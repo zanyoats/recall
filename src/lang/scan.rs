@@ -8,9 +8,9 @@ pub enum Token {
     Eof,
     Ident(String),
     Var(String),
-    Int(i64),
+    Number(String),
     String(String),
-    Whitespace(String),
+    Whitespace(char),
     OpenParen,
     CloseParen,
     Period,
@@ -33,10 +33,6 @@ fn is_start_of_string(ch: &char) -> bool {
     *ch == '"'
 }
 
-fn is_string(ch: &char) -> bool {
-    *ch != '"'
-}
-
 fn is_start_of_var(ch: &char) -> bool {
     ch.is_uppercase() && ch.is_ascii_alphabetic() || *ch == '_'
 }
@@ -45,13 +41,11 @@ fn is_var(ch: &char) -> bool {
     ch.is_ascii_alphanumeric() || *ch == '_'
 }
 
-// TODO: only supporting integer numbers
 fn is_start_of_num(ch: &char) -> bool {
-    ch.is_ascii_digit()
-}
-
-fn is_num(ch: &char) -> bool {
-    ch.is_ascii_digit() || *ch == '_'
+       ch.is_digit(10)
+    // || *ch == '.'
+    || *ch == '+'
+    || *ch == '-'
 }
 
 fn scan_repeatedly<F>(stream: &mut Peekable<impl Iterator<Item = char>>, predicate: F) -> String
@@ -72,22 +66,71 @@ where
     value
 }
 
-fn scan_whitespace(stream: &mut Peekable<impl Iterator<Item = char>>) -> Token {
-    let value = scan_repeatedly(stream, |ch| ch.is_whitespace());
-
-    Token::Whitespace(value)
-}
-
 fn scan_ident(stream: &mut Peekable<impl Iterator<Item = char>>) -> Token {
     let value = scan_repeatedly(stream, is_ident);
 
     Token::Ident(value)
 }
 
-fn scan_string(stream: &mut Peekable<impl Iterator<Item = char>>) -> Token {
-    let value = scan_repeatedly(stream, is_string);
+fn scan_string(stream: &mut Peekable<impl Iterator<Item = char>>) -> Result<Token, String> {
+    let mut val = String::new();
 
-    Token::String(value)
+    loop {
+        match stream.peek() {
+            Some('"') => {
+                stream.next();
+                break Ok(Token::String(val))
+            },
+            Some('\\') => {
+                stream.next();
+                match stream.peek() {
+                    Some('"') => {
+                        stream.next();
+                        val.push('"');
+                        continue
+                    }
+                    Some('\\') => {
+                        stream.next();
+                        val.push('\\');
+                        continue
+                    }
+                    Some('t') => {
+                        stream.next();
+                        val.push('\t');
+                        continue
+                    }
+                    Some('n') => {
+                        stream.next();
+                        val.push('\n');
+                        continue
+                    }
+                    Some('r') => {
+                        stream.next();
+                        val.push('\r');
+                        continue
+                    }
+                    Some('0') => {
+                        stream.next();
+                        val.push('\0');
+                        continue
+                    }
+                    Some(ch) => {
+                        break Err(format!("Error during scanning string: invalid escape '\\{ch}'"))
+                    }
+                    None => {
+                        break Err(format!("Error during scanning string: unexpected end of input"))
+                    }
+                }
+            }
+            Some(_) => {
+                val.push(stream.next().unwrap());
+                continue
+            }
+            None => {
+                break Err(format!("Error during scanning string: unexpected end of input"))
+            }
+        }
+    }
 }
 
 fn scan_var(stream: &mut Peekable<impl Iterator<Item = char>>) -> Token {
@@ -96,20 +139,135 @@ fn scan_var(stream: &mut Peekable<impl Iterator<Item = char>>) -> Token {
     Token::Var(value)
 }
 
-// TODO: fix this hacky approach
+fn scan_digit(
+    stream: &mut Peekable<impl Iterator<Item = char>>,
+    buf: &mut String,
+) -> Result<(), String> {
+    match stream.peek() {
+        Some(ch) if ch.is_digit(10) => {
+            buf.push(stream.next().unwrap());
+            Ok(())
+        }
+        Some(bad_ch) => {
+            Err(format!("Error during scanning number: unexpected character '{}'", *bad_ch))
+        }
+        None => {
+            Err(format!("Error during scanning number: unexpected end of stream"))
+        }
+    }
+}
+
+fn scan_digits(
+    stream: &mut Peekable<impl Iterator<Item = char>>,
+    buf: &mut String,
+) -> Result<(), String> {
+    scan_digit(stream, buf)?;
+    loop {
+        match stream.peek() {
+            Some(&ch) if ch.is_digit(10) => {
+                scan_digit(stream, buf)?;
+                continue
+            }
+            Some('_') => {
+                stream.next();
+                scan_digit(stream, buf)?;
+                continue
+            }
+            _ => break Ok(()),
+        }
+    }
+}
+
+fn scan_decimal_num(
+    stream: &mut Peekable<impl Iterator<Item = char>>,
+) -> Result<String, String> {
+    let mut val = String::from("0.");
+    match stream.peek() {
+        Some(&ch) if ch.is_digit(10) => {
+            scan_digits(stream, &mut val)?;
+            match stream.peek() {
+                Some('e') => {
+                    val.push(stream.next().unwrap());
+                    scan_digits(stream, &mut val)?;
+                    Ok(val)
+                }
+                _ => Ok(val),
+            }
+        }
+        Some('e') => {
+            val.push(stream.next().unwrap());
+            scan_digits(stream, &mut val)?;
+            Ok(val)
+        }
+        Some(bad_ch) => {
+            Err(format!("Error during scanning number: unexpected character '{}'", *bad_ch))
+        }
+        None => {
+            Err(format!("Error during scanning number: unexpected end of stream"))
+        }
+    }
+}
+
 fn scan_num(
     stream: &mut Peekable<impl Iterator<Item = char>>,
-    positive_sign: bool,
 ) -> Result<Token, String> {
-    let mut value = String::from(if positive_sign { "" } else { "-" });
+    let mut val = String::new();
 
-    value.push_str(&scan_repeatedly(stream, is_num));
-
-    value
-        .replace("_", "")
-        .parse::<i64>()
-        .map(|n| Token::Int(n))
-        .map_err(|e| format!("Error during scanning number `{}`: {}", value, e))
+    loop {
+        match stream.peek() {
+            Some(&ch) if ch.is_digit(10) => {
+                scan_digits(stream, &mut val)?;
+                match stream.peek() {
+                    Some('.') => {
+                        val.push(stream.next().unwrap());
+                        match stream.peek() {
+                            Some(&ch) if ch.is_digit(10) => {
+                                scan_digits(stream, &mut val)?;
+                                match stream.peek() {
+                                    Some('e') => {
+                                        val.push(stream.next().unwrap());
+                                        scan_digits(stream, &mut val)?;
+                                        break Ok(Token::Number(val))
+                                    }
+                                    _ => break Ok(Token::Number(val)),
+                                }
+                            }
+                            Some('e') => {
+                                val.push(stream.next().unwrap());
+                                scan_digits(stream, &mut val)?;
+                                break Ok(Token::Number(val))
+                            }
+                            _ => break Ok(Token::Number(val)),
+                        }
+                    },
+                    Some('e') => {
+                        val.push(stream.next().unwrap());
+                        scan_digits(stream, &mut val)?;
+                        break Ok(Token::Number(val))
+                    },
+                    _ => break Ok(Token::Number(val)),
+                }
+            },
+            Some('.') => {
+                stream.next();
+                let decimal_part = scan_decimal_num(stream)?;
+                val.push_str(&decimal_part);
+                break Ok(Token::Number(val))
+            }
+            Some(&ch) if ch == '+' || ch == '-' => {
+                if stream.next().unwrap() == '-' {
+                    val.push('-');
+                }
+                continue
+            }
+            Some(bad_ch) => {
+                break Err(format!("Error during scanning number: unexpected character '{}'", *bad_ch))
+            }
+            None => {
+                break Err(format!("Error during scanning number: unexpected end of stream"))
+            }
+        }
+    }
 }
 
 pub struct Scanner<'a> {
@@ -147,61 +305,20 @@ impl<'a> Scanner<'a> {
     fn scan_token(&mut self) -> Result<Token, String> {
         if let Some(ch) = self.stream.peek() {
             if ch.is_whitespace() {
-                Ok(scan_whitespace(&mut self.stream))
-            } else if is_start_of_ident(ch) {
-                Ok(scan_ident(&mut self.stream))
-            } else if is_start_of_string(ch) {
-                self.stream.next();
-                let result = scan_string(&mut self.stream);
-                match self.stream.peek() {
-                    Some(ch) => {
-                        assert!(*ch == '"');
-                        self.stream.next();
-                        Ok(result)
-                    }
-                    None => {
-                        Err(format!(
-                            "Error during scanning: unexpected end of stream reached"
-                        ))
-                    }
-                }
-            } else if is_start_of_num(ch) {
-                Ok(scan_num(&mut self.stream, true)?)
-            } else if is_start_of_var(ch) {
-                Ok(scan_var(&mut self.stream))
-            // Punctuation
-            } else if *ch == '(' {
-                self.stream.next();
-                Ok(Token::OpenParen)
-            } else if *ch == ')' {
-                self.stream.next();
-                Ok(Token::CloseParen)
+                Ok(Token::Whitespace(self.stream.next().unwrap()))
             // Operators
             } else if *ch == '.' {
                 self.stream.next();
-                Ok(Token::Period)
+                match self.stream.peek() {
+                    Some(ch) if ch.is_digit(10) => {
+                        let decimal_part = scan_decimal_num(&mut self.stream)?;
+                        Ok(Token::Number(decimal_part))
+                    },
+                    _ => Ok(Token::Period)
+                }
             } else if *ch == ',' {
                 self.stream.next();
                 Ok(Token::Comma)
-            } else if *ch == '+' || *ch == '-' {
-                let positive = *ch == '+';
-
-                self.stream.next();
-
-                if let Some(ch) = self.stream.peek() {
-                    if is_start_of_num(ch) {
-                        Ok(scan_num(&mut self.stream, positive)?)
-                    } else {
-                        return Err(format!(
-                            "Error during scanning number: unexpected character: `{}`",
-                            ch,
-                        ));
-                    }
-                } else {
-                    return Err(format!(
-                        "Error during scanning: unexpected end of stream reached"
-                    ));
-                }
             } else if *ch == ':' {
                 self.stream.next();
 
@@ -213,6 +330,22 @@ impl<'a> Scanner<'a> {
                         "Error during scanning: unexpected end of stream reached"
                     ));
                 }
+            } else if is_start_of_ident(ch) {
+                Ok(scan_ident(&mut self.stream))
+            } else if is_start_of_string(ch) {
+                self.stream.next();
+                Ok(scan_string(&mut self.stream)?)
+            } else if is_start_of_num(ch) {
+                scan_num(&mut self.stream)
+            } else if is_start_of_var(ch) {
+                Ok(scan_var(&mut self.stream))
+            // Punctuation
+            } else if *ch == '(' {
+                self.stream.next();
+                Ok(Token::OpenParen)
+            } else if *ch == ')' {
+                self.stream.next();
+                Ok(Token::CloseParen)
             } else {
                 return Err(format!(
                     "Error during scanning: unexpected character: `{}`",
@@ -284,13 +417,29 @@ mod tests {
                 ],
             ),
             (
-                "foo(\"bar\", 42).",
+                r#"foo("bar\t\"hello\"\nlemon 'foo'", 42.42, .42, 42., -.42, 42e42, -42.0e42, -42.e42, .42e42, 69_420)."#,
                 vec![
                     Ident("foo".to_string()),
                     OpenParen,
-                    String("bar".to_string()),
+                    String("bar\t\"hello\"\nlemon 'foo'".to_string()),
                     Comma,
-                    Int(42),
+                    Number("42.42".to_string()),
+                    Comma,
+                    Number("0.42".to_string()),
+                    Comma,
+                    Number("42.".to_string()),
+                    Comma,
+                    Number("-0.42".to_string()),
+                    Comma,
+                    Number("42e42".to_string()),
+                    Comma,
+                    Number("-42.0e42".to_string()),
+                    Comma,
+                    Number("-42.e42".to_string()),
+                    Comma,
+                    Number("0.42e42".to_string()),
+                    Comma,
+                    Number("69420".to_string()),
                     CloseParen,
                     Period,
                 ]
@@ -308,7 +457,7 @@ mod tests {
         let test_cases = [
             ("*", "Error during scanning: unexpected character: `*`"),
             (":", "Error during scanning: unexpected end of stream reached"),
-            ("+", "Error during scanning: unexpected end of stream reached"),
+            ("+", "Error during scanning number: unexpected end of stream"),
         ];
 
         for (expr, expected_error) in test_cases {

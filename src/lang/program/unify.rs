@@ -6,9 +6,9 @@ pub type Bindings<'a> = HashMap<&'a str, &'a Term>;
 
 pub fn unify_terms<'a>(t0: &'a Term, t1: &'a Term, bindings: &mut Bindings<'a>) -> bool {
     match (t0, t1) {
-        (Term::Ident(x), Term::Ident(y)) =>
+        (Term::Symbol(x), Term::Symbol(y)) =>
             x == y,
-        (Term::Int(x), Term::Int(y)) =>
+        (Term::Number(x), Term::Number(y)) =>
             x == y,
         (Term::String(x), Term::String(y)) =>
             x == y,
@@ -103,11 +103,11 @@ mod tests {
     #[test]
     fn it_unifies_simple_terms() {
         let y_var = Var("Y".to_string());
-        let foo_ident = Ident("foo".to_string());
+        let foo_ident = Symbol("foo".to_string());
         let test_cases = vec![
             (
-                Ident("foo".to_string()),
-                Ident("foo".to_string()),
+                Symbol("foo".to_string()),
+                Symbol("foo".to_string()),
                 vec![],
             ),
             (
@@ -117,10 +117,10 @@ mod tests {
             ),
             (
                 Var("X".to_string()),
-                Ident("foo".to_string()),
+                Symbol("foo".to_string()),
                 vec![("X", &foo_ident)],
             ),
-            (Int(42), Int(42), vec![]),
+            (Number("42".to_string()), Number("42".to_string()), vec![]),
             (
                 Functor(
                     "foo".to_string(),
@@ -143,16 +143,16 @@ mod tests {
     #[test]
     fn it_fails_to_unify_terms() {
         let test_cases = [
-            (Ident("foo".to_string()), Ident("bar".to_string())),
-            (Int(42), Int(69)),
+            (Symbol("foo".to_string()), Symbol("bar".to_string())),
+            (Number("42".to_string()), Number("69".to_string())),
             (
                 Functor(
                     "foo".to_string(),
-                    vec![Ident("foo".to_string())],
+                    vec![Symbol("foo".to_string())],
                 ),
                 Functor(
                     "foo".to_string(),
-                    vec![Ident("bar".to_string())],
+                    vec![Symbol("bar".to_string())],
                 ),
             ),
         ];
@@ -182,7 +182,7 @@ mod tests {
                         Var("Z".to_string()),
                     ],
                 ),
-                Ident("foo".to_string()),
+                Symbol("foo".to_string()),
             ],
         );
         let mut bindings = HashMap::new();
@@ -193,7 +193,7 @@ mod tests {
                 "bar".to_string(),
                 vec![Var("Z".to_string())],
             )),
-            ("Z", &Ident("foo".to_string())),
+            ("Z", &Symbol("foo".to_string())),
         ]);
     }
 
@@ -201,11 +201,11 @@ mod tests {
     fn it_fails_to_unify_complex_terms() {
         let t0 = Functor(
             "foo".to_string(),
-            vec![Ident("apple".to_string()), Var("X".to_string())],
+            vec![Symbol("apple".to_string()), Var("X".to_string())],
         );
         let t1 = Functor(
             "foo".to_string(),
-            vec![Var("X".to_string()), Ident("lemon".to_string())],
+            vec![Var("X".to_string()), Symbol("lemon".to_string())],
         );
         let mut bindings = HashMap::new();
         assert!(!unify_terms(&t0, &t1, &mut bindings));
@@ -269,7 +269,7 @@ mod tests {
             vec![
                 Var("Y".to_string()),
                 Var("Z".to_string()),
-                Ident("foo".to_string()),
+                Symbol("foo".to_string()),
                 Var("R".to_string()),
             ],
         );
@@ -278,8 +278,8 @@ mod tests {
         assert_bindings!(bindings, [
             ("X", &Var("Y".to_string())),
             ("Y", &Var("Z".to_string())),
-            ("Z", &Ident("foo".to_string())),
-            ("R", &Ident("foo".to_string())),
+            ("Z", &Symbol("foo".to_string())),
+            ("R", &Symbol("foo".to_string())),
         ]);
     }
 }

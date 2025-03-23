@@ -2,22 +2,18 @@ use std::env;
 use std::io;
 use std::io::Read;
 use std::io::Write;
-use std::fs;
 use std::fs::OpenOptions;
-use std::collections::HashMap;
 
 use recall::eval::Eval;
 use recall::eval::DbEngine;
 use recall::eval::naive::Naive;
 use recall::lang::Program;
 use recall::lang::Term;
-use recall::storage::engine::Engine;
-use recall::storage::engine::linked_list;
-use recall::storage::engine::SchemaType;
-use recall::storage::engine::SchemaArg;
-use recall::storage::engine::ArgType;
-use recall::storage::engine::NO_FLAGS;
-use recall::storage::engine::RecordValue;
+use recall::storage::db::DB;
+use recall::storage::db::Predicate;
+use recall::storage::engine::btree::format::CatalogOps;
+use recall::storage::engine::btree::format::CatalogPage;
+use recall::storage::engine::btree::format::ParameterType;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -25,14 +21,9 @@ fn main() {
     let program_name = args[0];
     match &args[1..] {
         [] => {
-            let default_base_dir = "./paths_db";
-            run_repl(default_base_dir, None);
-        }
-        ["--create-db"] => {
-            create_db("./paths_db");
+            run_repl("./paths.db", None);
         }
         [file_path] => {
-            let default_base_dir = "./paths_db";
             let mut program_file =
                 OpenOptions::new()
                 .read(true)
@@ -41,18 +32,45 @@ fn main() {
             let mut program_string = String::new();
             program_file.read_to_string(&mut program_string).unwrap();
             let program = Program::from_string(&program_string).unwrap();
-            run_repl(default_base_dir, Some(program));
+            run_repl("./paths.db", Some(program));
         }
         _ => {
             panic!(
-                "usage error: {} [--create-courses-db] [--create-paths-db]",
+                "usage error: {} [program_file]",
                 program_name);
         }
     }
 }
 
-fn run_repl(base_dir: &str, additional: Option<Program>) {
-    let mut db_engine = LinkedListEngine::<linked_list::Predicate>::open(base_dir).unwrap();
+fn create_db(file_path: &str) -> DB {
+    let mut db = DB::new(file_path);
+    let links = db.create_predicate("links", &vec![
+        CatalogPage::SYMBOL_TYPE,
+        CatalogPage::SYMBOL_TYPE,
+    ]);
+    links.assert(&vec![
+        ParameterType::Symbol("a".to_string()),
+        ParameterType::Symbol("b".to_string()),
+    ]).unwrap();
+    links.assert(&vec![
+        ParameterType::Symbol("b".to_string()),
+        ParameterType::Symbol("c".to_string()),
+    ]).unwrap();
+    links.assert(&vec![
+        ParameterType::Symbol("c".to_string()),
+        ParameterType::Symbol("c".to_string()),
+    ]).unwrap();
+    links.assert(&vec![
+        ParameterType::Symbol("c".to_string()),
+        ParameterType::Symbol("d".to_string()),
+    ]).unwrap();
+    db
+}
+
+fn run_repl(file_path: &str, additional: Option<Program>) {
+    let mut db = create_db(file_path);
+    let links = db.get_predicate("links");
+    let mut dummy_engine = DummyEngine { predicate: links };
     loop {
         io::stdout()
         .write_all(b"repl> ")
@@ -94,12 +112,12 @@ fn run_repl(base_dir: &str, additional: Option<Program>) {
         let results = match query {
             Ok(query) => {
                 let context =
-                    <Naive as Eval>::from_term(&query, additional.as_ref(), &mut db_engine);
+                    <Naive as Eval>::from_term(&query, additional.as_ref(), &mut dummy_engine);
                 context.execute()
             }
             Err(query) => {
                 let context =
-                    <Naive as Eval>::from_rule(&query, additional.as_ref(), &mut db_engine);
+                    <Naive as Eval>::from_rule(&query, additional.as_ref(), &mut dummy_engine);
                 context.execute()
             }
         };
@@ -110,98 +128,29 @@ fn run_repl(base_dir: &str, additional: Option<Program>) {
     }
 }
 
-fn create_db(base_dir: &str) {
-    let name = "link";
-    let schema = vec![
-        SchemaArg {
-            schema_type: SchemaType::String(20),
-            flags: NO_FLAGS,
-        },
-        SchemaArg {
-            schema_type: SchemaType::String(20),
-            flags: NO_FLAGS,
-        },
-    ];
-    let keys = vec![];
-    let mut pred = <linked_list::Predicate as Engine>::create(&base_dir, name, schema, keys);
-
-    let links = vec![
-        vec![ArgType::String("a".to_string()), ArgType::String("b".to_string())],
-        vec![ArgType::String("b".to_string()), ArgType::String("c".to_string())],
-        vec![ArgType::String("c".to_string()), ArgType::String("c".to_string())],
-        vec![ArgType::String("c".to_string()), ArgType::String("d".to_string())],
-    ];
-
-    for elem in links {
-        pred.assertz(&elem);
-    }
-    pred.save();
+struct DummyEngine {
+    predicate: Predicate,
 }
 
-// Get stored terms from db engine
-pub struct LinkedListEngine<T: Engine> {
-    pub stored_predicates: HashMap<FunctorSpec, T>,
-}
-
-type FunctorSpec = (String, usize);
-
-impl<T: Engine> DbEngine for LinkedListEngine<T> {
+impl DbEngine for DummyEngine {
     fn get_stored_terms(&mut self) -> Vec<Term> {
         self
-        .stored_predicates
-        .iter_mut()
-        .flat_map(|((name, _arity), stored_predicate)| {
-            stored_predicate
-            .iter()
-            .map(|record| {
-                record_2_functor(name, record)
-            })
+        .predicate
+        .iter_owned()
+        .map(|tuple| {
+            tuple_2_functor("link", &tuple)
         })
         .collect()
     }
 }
 
-impl<T: Engine> LinkedListEngine<T> {
-    pub fn open(base_dir: &str) -> Result<Self, io::Error> {
-        let mut stored_predicates = HashMap::new();
-
-        for result in fs::read_dir(base_dir)? {
-            let dir_entry = result?;
-            let is_pred_file =
-                dir_entry
-                .path()
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map_or(false, |ext| ext == "db");
-
-            if !is_pred_file { continue }
-
-            let file_name = dir_entry.file_name();
-            let name =
-                file_name
-                .to_str()
-                .unwrap()
-                .strip_suffix(".db")
-                .unwrap();
-            eprintln!("DEBUG: added stored predicate: '{name}'");
-            let mut pred = T::open(base_dir, name);
-            let arity = pred.artiy();
-            let key = (name.to_string(), arity);
-            stored_predicates.insert(key, pred);
-        }
-
-        Ok(LinkedListEngine { stored_predicates })
-    }
-}
-
-fn record_2_functor<T: RecordValue>(name: &str, record: T) -> Term {
+fn tuple_2_functor(name: &str, tuple: &[ParameterType]) -> Term {
     let terms: Vec<Term> =
-        record
-        .value()
+        tuple
         .iter()
         .map(|arg_type| match arg_type {
-            ArgType::String(v) => Term::String(v.to_string()),
-            ArgType::Int(v) => Term::Int(*v),
+            ParameterType::Symbol(val) => Term::Symbol(val.to_string()),
+            _ => { panic!("ahhh") }
         })
         .collect();
 

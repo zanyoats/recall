@@ -142,9 +142,10 @@ fn parse_term_list(scanner: &mut Scanner) -> Result<Vec<Term>, String> {
 
 fn try_parse_term(scanner: &mut Scanner) -> Result<Option<Term>, String> {
     match scanner.next_token()? {
-        Token::Ident(x) => Ok(Some(Term::Ident(x))),
+        Token::Ident(x) => Ok(Some(Term::Symbol(x))),
         Token::Var(x) => Ok(Some(Term::Var(x))),
-        Token::Int(x) => Ok(Some(Term::Int(x))),
+        Token::Number(x) => Ok(Some(Term::Number(x))),
+        Token::String(x) => Ok(Some(Term::String(x))),
         token => {
             scanner.put_back(token);
             Ok(None)
@@ -154,9 +155,9 @@ fn try_parse_term(scanner: &mut Scanner) -> Result<Option<Term>, String> {
 
 fn parse_term(scanner: &mut Scanner) -> Result<Term, String> {
     match scanner.next_token()? {
-        Token::Ident(x) => Ok(Term::Ident(x)),
+        Token::Ident(x) => Ok(Term::Symbol(x)),
         Token::Var(x) => Ok(Term::Var(x)),
-        Token::Int(x) => Ok(Term::Int(x)),
+        Token::Number(x) => Ok(Term::Number(x)),
         Token::String(x) => Ok(Term::String(x)),
         Token::Eof => Err(String::from(
             "Error during parsing term: unexpected end of input",
