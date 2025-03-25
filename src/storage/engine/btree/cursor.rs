@@ -133,7 +133,7 @@ mod tests {
                 .collect();
             for (key, val) in pairs.iter() {
                 let tuple_index: usize = root_node.leaf_find_tuple_index(key);
-                assert!(root_node.leaf_put(key, val, tuple_index))
+                assert!(root_node.leaf_put(key, val, tuple_index).unwrap());
             }
         }
 
@@ -196,7 +196,7 @@ mod tests {
                 .collect();
             for (key, val) in pairs.iter() {
                 let tuple_index: usize = node.leaf_find_tuple_index(key);
-                assert!(node.leaf_put(key, val, tuple_index))
+                assert!(node.leaf_put(key, val, tuple_index).unwrap());
             }
         }
 
@@ -217,7 +217,7 @@ mod tests {
                 .collect();
             for (key, val) in pairs.iter() {
                 let tuple_index: usize = node.leaf_find_tuple_index(key);
-                assert!(node.leaf_put(key, val, tuple_index))
+                assert!(node.leaf_put(key, val, tuple_index).unwrap());
             }
         }
 

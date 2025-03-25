@@ -5,6 +5,7 @@ mod cursor;
 use std::rc::Rc;
 use std::cell::RefCell;
 
+use crate::errors;
 use cursor::BTreeCursor;
 use pager::Pager;
 use format::PageHeader;
@@ -28,7 +29,7 @@ impl BPlusTree {
 impl BPlusTree {
     /// Inserts a key-value pair into the tree.
     /// Splits nodes if needed and updates internal pointers.
-    pub fn insert(&self, key: u32, val: &Tuple) -> Result<(), &'static str> {
+    pub fn insert(&self, key: u32, val: &Tuple) -> Result<(), errors::RecallError> {
         let mut pager = self.pager.borrow_mut();
         let cursor = cursor::BTreeCursor::find(&mut pager, self.root_page_num, key);
         leaf_node_insert(&mut pager, cursor.page_num, cursor.tuple_index, key, val)
@@ -36,7 +37,7 @@ impl BPlusTree {
 
     /// Removes the key from the tree.
     /// Handles underflows by merging or redistributing keys.
-    // pub fn delete(&mut self, key: u32) -> Result<(), &'static str> {
+    // pub fn delete(&mut self, key: u32) -> Result<(), errors::RecallError> {
     //     todo!()
     // }
 
@@ -270,7 +271,7 @@ fn internal_node_insert(
     tuple_index: usize,
     key: u32,
     val: u32,
-) -> Result<(), &'static str> {
+) -> Result<(), errors::RecallError> {
     let inserted = {
         let node_cell = pager.fetch(page_num);
         let mut node = node_cell.borrow_mut();
@@ -289,11 +290,17 @@ fn leaf_node_insert(
     tuple_index: usize,
     key: u32,
     val: &Tuple,
-) -> Result<(), &'static str> {
+) -> Result<(), errors::RecallError> {
+    // The leaf put routine will return false when there is not enough space
+    // for the new tuple. It will return err variant for things like key unique
+    // error which will punt that to callers. An important invariant is that
+    // a key unique error will be signaled even if the node is full since it
+    // checks that condition first. So its important to attempt the leaf put
+    // routine before attempting the leaf split routine.
     let inserted = {
         let node_cell = pager.fetch(page_num);
         let mut node = node_cell.borrow_mut();
-        node.leaf_put(&key, val, tuple_index)
+        node.leaf_put(&key, val, tuple_index)?
     };
 
     if inserted {
@@ -327,7 +334,7 @@ fn split_internal_node_insert(
     tuple_index: usize,
     key: u32,
     val: u32,
-) -> Result<(), &'static str> {
+) -> Result<(), errors::RecallError> {
     let is_root_node = {
         let right_node_cell = pager.fetch(page_num);
         let right_node = right_node_cell.borrow_mut();
@@ -468,7 +475,7 @@ fn split_leaf_node_insert(
     tuple_index: usize,
     key: u32,
     val: &Tuple,
-) -> Result<(), &'static str> {
+) -> Result<(), errors::RecallError> {
     let is_root_node = {
         let right_node_cell = pager.fetch(page_num);
         let right_node = right_node_cell.borrow();
@@ -504,7 +511,7 @@ fn split_leaf_node_insert(
             tuple_index,
             key,
             val,
-        );
+        )?;
 
         // move right node into new_root
         let mut new_root = right_node;
@@ -554,7 +561,7 @@ fn split_leaf_node_insert(
                     tuple_index,
                     key,
                     val,
-                );
+                )?;
             }
 
             // set sibling pointers
@@ -662,6 +669,25 @@ mod tests {
         // assert can find by key that does exist
         let find = btree.find(find_key + 1);
         assert!(find.is_none());
+    }
+
+    #[test]
+    fn it_will_return_uniq_key_error_on_existing_key() {
+        let page_builder =
+            SlottedPageBuilder::new();
+        let mut fixture = Fixture::new("it_will_return_uniq_key_error_on_existing_key.db", page_builder);
+        let insert_key = 42;
+        let btree = fixture.build_tree_from_keys(vec![insert_key].into_iter());
+
+        // assert cannot insert the same key again
+        let tuple = {
+            let mut tuple = Tuple::new(FormattedBuf::uint_storage_size());
+            tuple.buf.write_u32_offset(0, insert_key);
+            tuple
+        };
+        let result = btree.insert(insert_key, &tuple);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), errors::RecallError::UniqueKeyError(insert_key));
     }
 
     #[test]

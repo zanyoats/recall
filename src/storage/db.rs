@@ -9,8 +9,8 @@ use crate::storage::engine::btree::format::CatalogOps;
 use crate::storage::engine::btree::format::LeafOps;
 use crate::storage::engine::btree::format::SlottedPageBuilder;
 use crate::storage::engine::btree::format::ParameterType;
-
-use super::engine::btree::BPlusTreeIntoIter;
+use crate::storage::engine::btree::BPlusTreeIntoIter;
+use crate::errors;
 
 pub struct DB {
     pager: Rc<RefCell<Pager>>,
@@ -91,9 +91,9 @@ impl Predicate {
         PredicateIterator::new(self.btree.clone().into_iter(), parameters)
     }
 
-    pub fn assert(&self, input: &[ParameterType]) -> Result<(), String> {
+    pub fn assert(&self, input: &[ParameterType]) -> Result<(), errors::RecallError> {
         if input.len() == 0 {
-            return Err(format!("TypeError: zero arity predicate can't be inserted"));
+            return Err(errors::RecallError::TypeError(format!("TypeError: zero arity predicate can't be inserted")));
         }
         let (key, parameters) = {
             let pager = self.btree.pager.borrow_mut();
@@ -102,7 +102,7 @@ impl Predicate {
             (key, parameters)
         };
         if input.len() != parameters.len() {
-            return Err(format!("TypeError: expected arity {}", parameters.len()));
+            return Err(errors::RecallError::TypeError(format!("TypeError: expected arity {}", parameters.len())));
         }
         let tuple = Tuple::encode(input, &parameters)?;
         self.btree.insert(key, &tuple).unwrap();
@@ -111,7 +111,7 @@ impl Predicate {
         Ok(())
     }
 
-    // pub fn retract(&self, data: &[ParameterType]) -> Result<(), String> {
+    // pub fn retract(&self, data: &[ParameterType]) -> Result<(), errors::RecallError> {
     //     todo!()
     // }
 }

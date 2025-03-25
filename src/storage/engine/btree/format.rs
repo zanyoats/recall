@@ -2,6 +2,8 @@ use std::mem;
 use std::ptr;
 use std::slice;
 
+use crate::errors;
+
 pub const PAGE_SIZE_4K: usize = 4096; // 4 KB pages
 pub const BYTE_SIZE: usize = mem::size_of::<u8>();
 pub const U16_SIZE: usize = mem::size_of::<u16>();
@@ -153,7 +155,7 @@ impl Tuple {
         self.buf.get_mut()
     }
 
-    pub fn encode(input: &[ParameterType], parameters: &[u8]) -> Result<Self, String> {
+    pub fn encode(input: &[ParameterType], parameters: &[u8]) -> Result<Self, errors::RecallError> {
         let storage_size =
             input
             .iter()
@@ -170,28 +172,28 @@ impl Tuple {
                     if let ParameterType::Symbol(val) = param_type {
                         offset = tuple.buf.write_symbol_offset(offset, &val);
                     } else {
-                        return Err(format!("TypeError: predicate tuple position {} expected type symbol", i));
+                        return Err(errors::RecallError::TypeError(format!("TypeError: predicate tuple position {} expected type symbol", i)));
                     }
                 }
                 CatalogPage::STRING_TYPE => {
                     if let ParameterType::String(val) = param_type {
                         offset = tuple.buf.write_string_offset(offset, &val);
                     } else {
-                        return Err(format!("TypeError: predicate tuple position {} expected type string", i));
+                        return Err(errors::RecallError::TypeError(format!("TypeError: predicate tuple position {} expected type string", i)));
                     }
                 }
                 CatalogPage::UINT_TYPE => {
                     if let ParameterType::UInt(val) = param_type {
                         offset = tuple.buf.write_u32_offset(offset, *val);
                     } else {
-                        return Err(format!("TypeError: predicate tuple position {} expected type unsigned int", i));
+                        return Err(errors::RecallError::TypeError(format!("TypeError: predicate tuple position {} expected type unsigned int", i)));
                     }
                 }
                 CatalogPage::INT_TYPE => {
                     if let ParameterType::Int(val) = param_type {
                         offset = tuple.buf.write_i32_offset(offset, *val);
                     } else {
-                        return Err(format!("TypeError: predicate tuple position {} expected type int", i));
+                        return Err(errors::RecallError::TypeError(format!("TypeError: predicate tuple position {} expected type int", i)));
                     }
                 }
                 _ => {
@@ -950,7 +952,12 @@ pub trait LeafOps: PageHeader {
     fn leaf_get_key(&self, tuple_index: usize) -> u32;
     fn leaf_get_val(&self, tuple_index: usize) -> Tuple;
     fn leaf_free_space(&mut self) -> u16;
-    fn leaf_put(&mut self, key: &u32, val: &Tuple, tuple_index: usize) -> bool;
+    fn leaf_put(
+        &mut self,
+        key: &u32,
+        val: &Tuple,
+        tuple_index: usize,
+    ) -> Result<bool, errors::RecallError>;
     fn leaf_split_into(
         &self,
         pivot_index: usize,
@@ -959,7 +966,7 @@ pub trait LeafOps: PageHeader {
         tuple_index: usize,
         key: u32,
         val: &Tuple,
-    );
+    ) -> Result<(), errors::RecallError>;
     fn min_key(&self) -> Option<u32>;
     fn max_key(&self) -> Option<u32>;
 }
@@ -1029,22 +1036,37 @@ impl LeafOps for SlottedPage {
         end_offset - begin_offset
     }
 
-    fn leaf_put(&mut self, key: &u32, val: &Tuple, tuple_index: usize) -> bool {
+    fn leaf_put(&mut self, key: &u32, val: &Tuple, tuple_index: usize) -> Result<bool, errors::RecallError> {
+        let num = self.num_tuples();
+
+        // check that key does not already exists
+        //
+        // This needs to be keep as the first check since before splitting
+        // we attempt to call the method. The splitting routine does not check
+        // that the key exists before inserting, so when refactoring we may need
+        // to check for key unique error in the splitting routine.
+        if tuple_index < num {
+            let stored_key = self.leaf_get_key(tuple_index);
+            if *key == stored_key {
+                return Err(errors::RecallError::UniqueKeyError(*key))
+            }
+        }
+
+        // check space requirements
         let (_, begin_offset) = self.buf.read_u16_offset(Self::LEAF_FREE_BEGIN_PTR_OFFSET);
         let (_, end_offset) = self.buf.read_u16_offset(Self::LEAF_FREE_END_PTR_OFFSET);
         let free_space = end_offset - begin_offset;
         let val_len = val.buf.get().len();
         let space_needed = u16::try_from(Self::LEAF_KEY_STRIDE + val_len).unwrap();
         if space_needed > free_space {
-            return false
+            return Ok(false)
         }
 
-        let num = self.num_tuples();
-
+        // check cap limit
         if let Some(cap_limit) = self.cap_limit {
             if num == cap_limit {
                 // println!("DEBUG: cap limit ({}) reached for leaf node.", cap_limit);
-                return false
+                return Ok(false)
             }
         }
 
@@ -1076,7 +1098,7 @@ impl LeafOps for SlottedPage {
         self.buf.write_u16_offset(Self::LEAF_FREE_BEGIN_PTR_OFFSET, begin_offset + u16::try_from(Self::LEAF_KEY_STRIDE).unwrap());
         self.buf.write_u16_offset(Self::LEAF_FREE_END_PTR_OFFSET, val_offset);
 
-        true
+        Ok(true)
     }
 
     /// Assumes left and right were initialized already
@@ -1088,7 +1110,7 @@ impl LeafOps for SlottedPage {
         tuple_index: usize,
         key: u32,
         val: &Tuple,
-    ) {
+    ) -> Result<(), errors::RecallError> {
         let num = self.num_tuples();
 
         assert!(num > 1);
@@ -1098,7 +1120,7 @@ impl LeafOps for SlottedPage {
             // left will be full and right will be empty
             pivot_index = num;
 
-            assert!(right.leaf_put(&key, &val, 0));
+            assert!(right.leaf_put(&key, &val, 0)?);
         }
 
         {
@@ -1106,12 +1128,12 @@ impl LeafOps for SlottedPage {
             for i in 0..pivot_index {
                 if i == tuple_index {
                     shift = 1;
-                    assert!(left.leaf_put(&key, val, i));
+                    assert!(left.leaf_put(&key, val, i)?);
                 }
 
                 let key = self.leaf_get_key(i);
                 let val = self.leaf_get_val(i);
-                assert!(left.leaf_put(&key, &val, i + shift));
+                assert!(left.leaf_put(&key, &val, i + shift)?);
             }
         }
 
@@ -1120,14 +1142,16 @@ impl LeafOps for SlottedPage {
             for i in pivot_index..num {
                 if i == tuple_index {
                     shift = 1;
-                    assert!(right.leaf_put(&key, val, i - pivot_index));
+                    assert!(right.leaf_put(&key, val, i - pivot_index)?);
                 }
 
                 let key = self.leaf_get_key(i);
                 let val = self.leaf_get_val(i);
-                assert!(right.leaf_put(&key, &val, (i + shift) - pivot_index));
+                assert!(right.leaf_put(&key, &val, (i + shift) - pivot_index)?);
             }
         }
+
+        Ok(())
     }
 
     fn min_key(&self) -> Option<u32> {
@@ -1297,7 +1321,7 @@ mod tests {
         // put tuples
         for (key, val) in pairs.iter() {
             let tuple_index: usize = page.leaf_find_tuple_index(key);
-            assert!(page.leaf_put(key, val, tuple_index))
+            assert!(page.leaf_put(key, val, tuple_index).unwrap());
         }
 
         assert!(page.num_tuples() == pairs.len());
@@ -1322,6 +1346,39 @@ mod tests {
             assert!(&stored_key == key);
             assert!(&stored_val == val);
         }
+    }
+
+    #[test]
+    fn it_will_return_uniq_key_error_on_existing_key() {
+        let mut page =
+            SlottedPageBuilder::new()
+            .build();
+        page.leaf_initialize_node(false);
+
+        // put tuples
+        // [0 3 6 12 69], insert 69
+        let insert_key = 69;
+        let keys = vec![6, 0, 3, 69, 12];
+
+        for key in keys.iter() {
+            let tuple_index: usize = page.leaf_find_tuple_index(key);
+            let tuple = {
+                let mut tuple = Tuple::new(FormattedBuf::uint_storage_size());
+                tuple.buf.write_u32_offset(0, *key);
+                tuple
+            };
+            assert!(page.leaf_put(key, &tuple, tuple_index).unwrap());
+        }
+
+        let tuple_index: usize = page.leaf_find_tuple_index(&insert_key);
+        let tuple = {
+            let mut tuple = Tuple::new(FormattedBuf::uint_storage_size());
+            tuple.buf.write_u32_offset(0, insert_key);
+            tuple
+        };
+        let result = page.leaf_put(&insert_key, &tuple, tuple_index);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), errors::RecallError::UniqueKeyError(insert_key));
     }
 
     #[test]
@@ -1438,7 +1495,7 @@ mod tests {
                 tuple.buf.write_u32_offset(0, *key);
                 tuple
             };
-            assert!(page.leaf_put(key, &tuple, tuple_index))
+            assert!(page.leaf_put(key, &tuple, tuple_index).unwrap());
         }
 
         // initialize left & right pages
@@ -1466,7 +1523,7 @@ mod tests {
             tuple_index,
             insert_key,
             &tuple,
-        );
+        ).unwrap();
 
         // re-initialize page
         page.leaf_initialize_node(false);
@@ -1530,7 +1587,7 @@ mod tests {
                 tuple.buf.write_u32_offset(0, *key);
                 tuple
             };
-            assert!(page.leaf_put(key, &tuple, tuple_index))
+            assert!(page.leaf_put(key, &tuple, tuple_index).unwrap());
         }
 
         let tuple = {
@@ -1539,7 +1596,7 @@ mod tests {
             tuple
         };
         let tuple_index: usize = page.leaf_find_tuple_index(&insert_key);
-        assert!(!page.leaf_put(&insert_key, &tuple, tuple_index))
+        assert!(!page.leaf_put(&insert_key, &tuple, tuple_index).unwrap());
     }
 
     #[test]
@@ -1588,7 +1645,7 @@ mod tests {
                 tuple.buf.write_u32_offset(0, *key);
                 tuple
             };
-            assert!(page.leaf_put(key, &tuple, tuple_index))
+            assert!(page.leaf_put(key, &tuple, tuple_index).unwrap());
         }
 
         // initialize left & right pages
@@ -1616,7 +1673,7 @@ mod tests {
             tuple_index,
             insert_key,
             &tuple,
-        );
+        ).unwrap();
 
         // check left page
         assert!(left.num_tuples() == keys.len());
