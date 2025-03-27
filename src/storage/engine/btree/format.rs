@@ -168,11 +168,11 @@ impl Tuple {
             let param_type = &input[i];
 
             match *parameter {
-                CatalogPage::SYMBOL_TYPE => {
-                    if let ParameterType::Symbol(val) = param_type {
-                        offset = tuple.buf.write_symbol_offset(offset, &val);
+                CatalogPage::ATOM_TYPE => {
+                    if let ParameterType::Atom(val) = param_type {
+                        offset = tuple.buf.write_atom_offset(offset, &val);
                     } else {
-                        return Err(errors::RecallError::TypeError(format!("TypeError: predicate tuple position {} expected type symbol", i)));
+                        return Err(errors::RecallError::TypeError(format!("TypeError: predicate tuple position {} expected type atom", i)));
                     }
                 }
                 CatalogPage::STRING_TYPE => {
@@ -209,9 +209,9 @@ impl Tuple {
         let mut offset: usize = 0;
         for parameter in parameters.iter() {
             match *parameter {
-                CatalogPage::SYMBOL_TYPE => {
-                    let (offset1, val) = self.buf.read_symbol_offset(offset);
-                    result.push(ParameterType::Symbol(val));
+                CatalogPage::ATOM_TYPE => {
+                    let (offset1, val) = self.buf.read_atom_offset(offset);
+                    result.push(ParameterType::Atom(val));
                     offset = offset1;
                 }
                 CatalogPage::STRING_TYPE => {
@@ -267,7 +267,7 @@ impl FormattedBuf {
         U32_SIZE
     }
 
-    pub fn symbol_storage_size(len: usize) -> usize {
+    pub fn atom_storage_size(len: usize) -> usize {
         BYTE_SIZE + len
     }
 
@@ -398,12 +398,12 @@ impl FormattedBuf {
         }
     }
 
-    // Symbol format
+    // Atom format
 
     // <i8>           (signed) byte is the length (max is 127)
     // <length bytes> string data
 
-    pub fn read_symbol_offset(&self, offset: usize) -> (usize, String) {
+    pub fn read_atom_offset(&self, offset: usize) -> (usize, String) {
         unsafe {
             let ptr = self.data.as_ptr().add(offset);
             let len = ptr.cast::<i8>().read_unaligned();
@@ -419,7 +419,7 @@ impl FormattedBuf {
         }
     }
 
-    pub fn write_symbol_offset(&mut self, offset: usize, val: &str) -> usize {
+    pub fn write_atom_offset(&mut self, offset: usize, val: &str) -> usize {
         assert!(val.len() > 0);
         assert!(val.len() <= 127);
 
@@ -487,7 +487,7 @@ impl FormattedBuf {
 ///   ...
 
 /// predicate_def
-///   name          symbol
+///   name          atom
 ///   root_page_num u32
 ///   last_tuple_id u32
 ///   arity         u8
@@ -495,7 +495,7 @@ impl FormattedBuf {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParameterType {
-    Symbol(String),
+    Atom(String),
     String(String),
     UInt(u32),
     Int(i32),
@@ -504,7 +504,7 @@ pub enum ParameterType {
 impl ParameterType {
     pub fn storage_size(&self) -> usize{
         match self {
-            ParameterType::Symbol(val) => FormattedBuf::symbol_storage_size(val.len()),
+            ParameterType::Atom(val) => FormattedBuf::atom_storage_size(val.len()),
             ParameterType::String(val) => FormattedBuf::string_storage_size(val.len()),
             ParameterType::UInt(_) => FormattedBuf::uint_storage_size(),
             ParameterType::Int(_) => FormattedBuf::int_storage_size(),
@@ -513,7 +513,7 @@ impl ParameterType {
 }
 
 pub trait CatalogOps {
-    const SYMBOL_TYPE: u8 = 0;
+    const ATOM_TYPE: u8 = 0;
     const STRING_TYPE: u8 = 1;
     const UINT_TYPE: u8   = 2;
     const INT_TYPE: u8    = 3;
@@ -542,13 +542,13 @@ impl CatalogOps for CatalogPage {
             }
         };
         let predicate_size =
-              u8::try_from(FormattedBuf::symbol_storage_size(name.len())).unwrap()
+              u8::try_from(FormattedBuf::atom_storage_size(name.len())).unwrap()
             + U32_SIZE as u8
             + U32_SIZE as u8
             + BYTE_SIZE as u8
             + u8::try_from(parameters.len()).unwrap();
         offset = self.buf.write_u8_offset(offset, predicate_size);
-        offset = self.buf.write_symbol_offset(offset, name);
+        offset = self.buf.write_atom_offset(offset, name);
         offset = self.buf.write_u32_offset(offset, root_page_num);
         offset = self.buf.write_u32_offset(offset, 0);
         let arity = u8::try_from(parameters.len()).unwrap();
@@ -565,7 +565,7 @@ impl CatalogOps for CatalogPage {
             let (offset, predicate_size) = self.buf.read_u8_offset(i);
             assert!(predicate_size > 0, "Predicate name not found");
             i = offset + predicate_size as usize;
-            let (offset, stored_name) = self.buf.read_symbol_offset(offset);
+            let (offset, stored_name) = self.buf.read_atom_offset(offset);
             if stored_name == find_name {
                 let (_, root_page_num) = self.buf.read_u32_offset(offset);
                 break root_page_num
@@ -581,7 +581,7 @@ impl CatalogOps for CatalogPage {
             let (offset, predicate_size) = self.buf.read_u8_offset(i);
             assert!(predicate_size > 0, "Predicate name not found");
             i = offset + predicate_size as usize;
-            let (offset, stored_name) = self.buf.read_symbol_offset(offset);
+            let (offset, stored_name) = self.buf.read_atom_offset(offset);
             if stored_name == find_name {
                 let (offset, _) = self.buf.read_u32_offset(offset);
                 let (_, last_tuple_id) = self.buf.read_u32_offset(offset);
@@ -598,7 +598,7 @@ impl CatalogOps for CatalogPage {
             let (offset, predicate_size) = self.buf.read_u8_offset(i);
             assert!(predicate_size > 0, "Predicate name not found");
             i = offset + predicate_size as usize;
-            let (offset, stored_name) = self.buf.read_symbol_offset(offset);
+            let (offset, stored_name) = self.buf.read_atom_offset(offset);
             if stored_name == find_name {
                 let (offset, _) = self.buf.read_u32_offset(offset);
                 let (_, last_tuple_id) = self.buf.read_u32_offset(offset);
@@ -616,7 +616,7 @@ impl CatalogOps for CatalogPage {
             let (offset, predicate_size) = self.buf.read_u8_offset(i);
             assert!(predicate_size > 0, "Predicate name not found");
             i = offset + predicate_size as usize;
-            let (offset, stored_name) = self.buf.read_symbol_offset(offset);
+            let (offset, stored_name) = self.buf.read_atom_offset(offset);
             if stored_name == find_name {
                 let (offset, _) = self.buf.read_u32_offset(offset);
                 let (offset, _) = self.buf.read_u32_offset(offset);
@@ -1292,7 +1292,7 @@ mod tests {
         fn build_tuple(key: u32) -> Tuple {
             let mut size = 0;
 
-            // tuple schema: (Id: uint, Note: string, N: int, Sym: symbol)
+            // tuple schema: (Id: uint, Note: string, N: int, Atom: atom)
             let id = key + 1000;
             size += FormattedBuf::uint_storage_size();
             let note = format!("My key is {}", key);
@@ -1300,13 +1300,13 @@ mod tests {
             let n = -42;
             size += FormattedBuf::int_storage_size();
             let sym = "foo";
-            size += FormattedBuf::symbol_storage_size(sym.len());
+            size += FormattedBuf::atom_storage_size(sym.len());
 
             let mut tuple = Tuple::new(size);
             let offset = tuple.buf.write_u32_offset(0, id);
             let offset = tuple.buf.write_string_offset(offset, &note);
             let offset = tuple.buf.write_i32_offset(offset, n);
-            tuple.buf.write_symbol_offset(offset, &sym);
+            tuple.buf.write_atom_offset(offset, &sym);
             tuple
         }
 
@@ -1717,12 +1717,12 @@ mod tests {
         page.define_predicate(
             10,
             "foo",
-            &vec![CatalogPage::SYMBOL_TYPE, CatalogPage::STRING_TYPE, CatalogPage::UINT_TYPE, CatalogPage::INT_TYPE],
+            &vec![CatalogPage::ATOM_TYPE, CatalogPage::STRING_TYPE, CatalogPage::UINT_TYPE, CatalogPage::INT_TYPE],
         );
         page.define_predicate(
             42,
             "bar",
-            &vec![CatalogPage::SYMBOL_TYPE],
+            &vec![CatalogPage::ATOM_TYPE],
         );
         page.define_predicate(
             69,
@@ -1732,14 +1732,14 @@ mod tests {
 
         assert!(page.get_predicate_root_page_num("foo") == 10);
         assert!(page.get_predicate_last_tuple_id("foo") == 0);
-        assert!(page.get_predicate_parameters("foo") == vec![CatalogPage::SYMBOL_TYPE, CatalogPage::STRING_TYPE, CatalogPage::UINT_TYPE, CatalogPage::INT_TYPE]);
+        assert!(page.get_predicate_parameters("foo") == vec![CatalogPage::ATOM_TYPE, CatalogPage::STRING_TYPE, CatalogPage::UINT_TYPE, CatalogPage::INT_TYPE]);
 
         page.inc_predicate_last_tuple_id("foo");
         assert!(page.get_predicate_last_tuple_id("foo") == 1);
 
         assert!(page.get_predicate_root_page_num("bar") == 42);
         assert!(page.get_predicate_last_tuple_id("bar") == 0);
-        assert!(page.get_predicate_parameters("bar") == vec![CatalogPage::SYMBOL_TYPE]);
+        assert!(page.get_predicate_parameters("bar") == vec![CatalogPage::ATOM_TYPE]);
 
         assert!(page.get_predicate_root_page_num("baz") == 69);
         assert!(page.get_predicate_last_tuple_id("baz") == 0);

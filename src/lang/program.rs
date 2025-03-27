@@ -61,7 +61,7 @@ pub struct Rule {
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
 pub enum Term {
-    Symbol(String),
+    Atom(String),
     Number(String),
     String(String),
     Var(String),
@@ -93,7 +93,7 @@ impl Term {
         bindings: &Bindings<'a>,
     ) -> Self {
         match term {
-            Term::Symbol(value) => Term::Symbol(value.to_string()),
+            Term::Atom(value) => Term::Atom(value.to_string()),
             Term::Number(value) => Term::Number(value.to_string()),
             Term::String(value) => Term::String(value.to_string()),
             Term::Var(value) => Self::lookup(value, bindings),
@@ -161,7 +161,7 @@ impl fmt::Display for Rule {
 impl fmt::Display for Term {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Term::Symbol(value) => write!(f, "{}", value),
+            Term::Atom(value) => write!(f, "{}", value),
             Term::Number(value) => write!(f, "{}", value),
             Term::String(value) => write!(f, "\"{}\"", value),
             Term::Var(value) => write!(f, "{}", value),
@@ -209,11 +209,11 @@ mod tests {
             facts: vec![
                 Functor(
                     "edge".to_string(),
-                    vec![Symbol("a".to_string()), Symbol("b".to_string())],
+                    vec![Atom("a".to_string()), Atom("b".to_string())],
                 ),
                 Functor(
                     "edge".to_string(),
-                    vec![Symbol("b".to_string()), Symbol("c".to_string())],
+                    vec![Atom("b".to_string()), Atom("c".to_string())],
                 ),
             ],
             rules: vec![

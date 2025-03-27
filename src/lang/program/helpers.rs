@@ -83,7 +83,7 @@ fn parse_body(scanner: &mut Scanner) -> Result<Vec<Term>, String> {
 }
 
 fn try_parse_functor(scanner: &mut Scanner) -> Result<Option<Term>, String> {
-    try_parse_ident(scanner).and_then(|option| {
+    try_parse_atom(scanner).and_then(|option| {
         if let Some(ident) = option {
             parse_rem_functor(scanner, ident)
                 .map(|v| Some(v))
@@ -94,7 +94,7 @@ fn try_parse_functor(scanner: &mut Scanner) -> Result<Option<Term>, String> {
 }
 
 fn parse_functor(scanner: &mut Scanner) -> Result<Term, String> {
-    parse_ident(scanner).and_then(|ident| {
+    parse_atom(scanner).and_then(|ident| {
         parse_rem_functor(scanner, ident)
     })
 }
@@ -142,7 +142,7 @@ fn parse_term_list(scanner: &mut Scanner) -> Result<Vec<Term>, String> {
 
 fn try_parse_term(scanner: &mut Scanner) -> Result<Option<Term>, String> {
     match scanner.next_token()? {
-        Token::Ident(x) => Ok(Some(Term::Symbol(x))),
+        Token::Atom(x) => Ok(Some(Term::Atom(x))),
         Token::Var(x) => Ok(Some(Term::Var(x))),
         Token::Number(x) => Ok(Some(Term::Number(x))),
         Token::String(x) => Ok(Some(Term::String(x))),
@@ -155,7 +155,7 @@ fn try_parse_term(scanner: &mut Scanner) -> Result<Option<Term>, String> {
 
 fn parse_term(scanner: &mut Scanner) -> Result<Term, String> {
     match scanner.next_token()? {
-        Token::Ident(x) => Ok(Term::Symbol(x)),
+        Token::Atom(x) => Ok(Term::Atom(x)),
         Token::Var(x) => Ok(Term::Var(x)),
         Token::Number(x) => Ok(Term::Number(x)),
         Token::String(x) => Ok(Term::String(x)),
@@ -169,9 +169,9 @@ fn parse_term(scanner: &mut Scanner) -> Result<Term, String> {
     }
 }
 
-fn try_parse_ident(scanner: &mut Scanner) -> Result<Option<String>, String> {
+fn try_parse_atom(scanner: &mut Scanner) -> Result<Option<String>, String> {
     match scanner.next_token()? {
-        Token::Ident(ident) => Ok(Some(ident)),
+        Token::Atom(x) => Ok(Some(x)),
         Token::Eof => Ok(None),
         token => Err(format!(
             "Error during parsing: expected an identifier found: {:?}",
@@ -180,9 +180,9 @@ fn try_parse_ident(scanner: &mut Scanner) -> Result<Option<String>, String> {
     }
 }
 
-fn parse_ident(scanner: &mut Scanner) -> Result<String, String> {
+fn parse_atom(scanner: &mut Scanner) -> Result<String, String> {
     match scanner.next_token()? {
-        Token::Ident(ident) => Ok(ident),
+        Token::Atom(x) => Ok(x),
         Token::Eof => Err(String::from(
             "Error during parsing: unexpected end of input",
         )),

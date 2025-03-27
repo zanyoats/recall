@@ -161,14 +161,14 @@ mod tests {
         let fixture = Fixture::new("it_can_create_predicates_and_use_them.db");
         let mut db = DB::new(&fixture.temp_path);
 
-        let pred = db.create_predicate("foo", &vec![CatalogPage::SYMBOL_TYPE, CatalogPage::INT_TYPE]);
+        let pred = db.create_predicate("foo", &vec![CatalogPage::ATOM_TYPE, CatalogPage::INT_TYPE]);
         pred.assert(&vec![
-            ParameterType::Symbol("apple".to_string()),
+            ParameterType::Atom("apple".to_string()),
             ParameterType::Int(42),
         ]).unwrap();
 
         pred.assert(&vec![
-            ParameterType::Symbol("lemon".to_string()),
+            ParameterType::Atom("lemon".to_string()),
             ParameterType::Int(1337),
         ]).unwrap();
 
@@ -188,8 +188,8 @@ mod tests {
         let pred = db.get_predicate("foo");
         let got: Vec<Vec<ParameterType>> = pred.iter_owned().collect();
         let want = vec![
-            vec![ParameterType::Symbol("apple".to_string()), ParameterType::Int(42)],
-            vec![ParameterType::Symbol("lemon".to_string()), ParameterType::Int(1337)],
+            vec![ParameterType::Atom("apple".to_string()), ParameterType::Int(42)],
+            vec![ParameterType::Atom("lemon".to_string()), ParameterType::Int(1337)],
         ];
         assert_eq!(got, want);
 

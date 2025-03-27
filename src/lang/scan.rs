@@ -6,7 +6,7 @@ use std::{
 #[derive(Debug, Eq, PartialEq)]
 pub enum Token {
     Eof,
-    Ident(String),
+    Atom(String),
     Var(String),
     Number(String),
     String(String),
@@ -21,11 +21,11 @@ pub enum Token {
 // Conider: Making TokenKind and Token
 // e.g. { token: TokenKind, text: String, span: (1,3) }
 
-fn is_start_of_ident(ch: &char) -> bool {
+fn is_start_of_atom(ch: &char) -> bool {
     ch.is_lowercase() && ch.is_ascii_alphanumeric()
 }
 
-fn is_ident(ch: &char) -> bool {
+fn is_atom(ch: &char) -> bool {
     ch.is_lowercase() && ch.is_ascii_alphanumeric() || *ch == '_'
 }
 
@@ -66,10 +66,10 @@ where
     value
 }
 
-fn scan_ident(stream: &mut Peekable<impl Iterator<Item = char>>) -> Token {
-    let value = scan_repeatedly(stream, is_ident);
+fn scan_atom(stream: &mut Peekable<impl Iterator<Item = char>>) -> Token {
+    let value = scan_repeatedly(stream, is_atom);
 
-    Token::Ident(value)
+    Token::Atom(value)
 }
 
 fn scan_string(stream: &mut Peekable<impl Iterator<Item = char>>) -> Result<Token, String> {
@@ -330,8 +330,8 @@ impl<'a> Scanner<'a> {
                         "Error during scanning: unexpected end of stream reached"
                     ));
                 }
-            } else if is_start_of_ident(ch) {
-                Ok(scan_ident(&mut self.stream))
+            } else if is_start_of_atom(ch) {
+                Ok(scan_atom(&mut self.stream))
             } else if is_start_of_string(ch) {
                 self.stream.next();
                 Ok(scan_string(&mut self.stream)?)
@@ -398,11 +398,11 @@ mod tests {
             (
                 "foo(a, b).",
                 vec![
-                    Ident("foo".to_string()),
+                    Atom("foo".to_string()),
                     OpenParen,
-                    Ident("a".to_string()),
+                    Atom("a".to_string()),
                     Comma,
-                    Ident("b".to_string()),
+                    Atom("b".to_string()),
                     CloseParen,
                     Period,
                 ],
@@ -412,14 +412,14 @@ mod tests {
                 vec![
                     Var("Bar123".to_string()),
                     If,
-                    Ident("foo".to_string()),
+                    Atom("foo".to_string()),
                     Period,
                 ],
             ),
             (
                 r#"foo("bar\t\"hello\"\nlemon 'foo'", 42.42, .42, 42., -.42, 42e42, -42.0e42, -42.e42, .42e42, 69_420)."#,
                 vec![
-                    Ident("foo".to_string()),
+                    Atom("foo".to_string()),
                     OpenParen,
                     String("bar\t\"hello\"\nlemon 'foo'".to_string()),
                     Comma,
@@ -476,11 +476,11 @@ mod tests {
         assert_tokens!(
             scanner,
             vec![
-                Ident("foo".to_string()),
+                Atom("foo".to_string()),
                 OpenParen,
-                Ident("a".to_string()),
+                Atom("a".to_string()),
                 Comma,
-                Ident("b".to_string()),
+                Atom("b".to_string()),
                 CloseParen,
                 Period,
             ]
@@ -491,7 +491,7 @@ mod tests {
     fn it_puts_back_a_token() {
         let expr = "functor.";
         let mut scanner = Scanner::new(expr);
-        scan_token!(scanner, Ident("functor".to_string()));
+        scan_token!(scanner, Atom("functor".to_string()));
         scan_token!(scanner, Period);
         // put back is useful here for reading in 'functor(' or 'functor.'
         scanner.put_back(Period);
