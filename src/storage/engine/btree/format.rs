@@ -182,6 +182,13 @@ impl Tuple {
                         return Err(errors::RecallError::TypeError(format!("TypeError: predicate tuple position {} expected type string", i)));
                     }
                 }
+                CatalogPage::BYTES_TYPE => {
+                    if let ParameterType::Bytes(val) = param_type {
+                        offset = tuple.buf.write_bytes_offset(offset, &val);
+                    } else {
+                        return Err(errors::RecallError::TypeError(format!("TypeError: predicate tuple position {} expected type bytes", i)));
+                    }
+                }
                 CatalogPage::UINT_TYPE => {
                     if let ParameterType::UInt(val) = param_type {
                         offset = tuple.buf.write_u32_offset(offset, *val);
@@ -217,6 +224,11 @@ impl Tuple {
                 CatalogPage::STRING_TYPE => {
                     let (offset1, val) = self.buf.read_string_offset(offset);
                     result.push(ParameterType::String(val));
+                    offset = offset1;
+                }
+                CatalogPage::BYTES_TYPE => {
+                    let (offset1, val) = self.buf.read_bytes_offset(offset);
+                    result.push(ParameterType::Bytes(val));
                     offset = offset1;
                 }
                 CatalogPage::UINT_TYPE => {
@@ -272,7 +284,10 @@ impl FormattedBuf {
     }
 
     pub fn string_storage_size(len: usize) -> usize {
-        // for now, assume overflow page is zero
+        BYTE_SIZE + len + U32_SIZE
+    }
+
+    pub fn bytes_storage_size(len: usize) -> usize {
         BYTE_SIZE + len + U32_SIZE
     }
 
@@ -479,6 +494,44 @@ impl FormattedBuf {
             offset + BYTE_SIZE + val.len() as usize + U32_SIZE
         }
     }
+
+    // Bytes format
+
+    // <u8>           byte is the length (max is 255)
+    // <length bytes> bytes
+    // <u32>          4 bytes for continuation or overflow page num
+
+    pub fn read_bytes_offset(&self, offset: usize) -> (usize, Vec<u8>) {
+        unsafe {
+            let ptr = self.data.as_ptr().add(offset);
+            let len = ptr.cast::<u8>().read_unaligned();
+            let ptr = ptr.add(BYTE_SIZE);
+            let val = slice::from_raw_parts(ptr, len as usize).to_vec();
+            let ptr = ptr.add(len as usize);
+            let overflow_page_num = ptr.cast::<u32>().read_unaligned();
+            let overflow_page_num = u32::from_be(overflow_page_num);
+            assert!(overflow_page_num == 0);
+
+            (offset + BYTE_SIZE + len as usize + U32_SIZE, val)
+        }
+    }
+
+    pub fn write_bytes_offset(&mut self, offset: usize, val: &[u8]) -> usize {
+        unsafe {
+            let ptr = self.data.as_mut_ptr().add(offset);
+            ptr.cast::<u8>().write(val.len() as u8);
+            let ptr = ptr.add(BYTE_SIZE);
+            ptr::copy_nonoverlapping(
+                val.as_ptr(),
+                ptr,
+                val.len(),
+            );
+            let ptr = ptr.add(val.len());
+            ptr.cast::<u32>().write(u32::to_be(0));
+
+            offset + BYTE_SIZE + val.len() as usize + U32_SIZE
+        }
+    }
 }
 
 /// Catalog page
@@ -490,13 +543,13 @@ impl FormattedBuf {
 ///   name          atom
 ///   root_page_num u32
 ///   last_tuple_id u32
-///   arity         u8
-///   param_i       u8
+///   params        bytes
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParameterType {
     Atom(String),
     String(String),
+    Bytes(Vec<u8>),
     UInt(u32),
     Int(i32),
 }
@@ -506,6 +559,7 @@ impl ParameterType {
         match self {
             ParameterType::Atom(val) => FormattedBuf::atom_storage_size(val.len()),
             ParameterType::String(val) => FormattedBuf::string_storage_size(val.len()),
+            ParameterType::Bytes(val) => FormattedBuf::bytes_storage_size(val.len()),
             ParameterType::UInt(_) => FormattedBuf::uint_storage_size(),
             ParameterType::Int(_) => FormattedBuf::int_storage_size(),
         }
@@ -513,10 +567,11 @@ impl ParameterType {
 }
 
 pub trait CatalogOps {
-    const ATOM_TYPE: u8 = 0;
+    const ATOM_TYPE: u8   = 0;
     const STRING_TYPE: u8 = 1;
     const UINT_TYPE: u8   = 2;
     const INT_TYPE: u8    = 3;
+    const BYTES_TYPE: u8  = 4;
     fn define_predicate(&mut self, root_page_num: u32, name: &str, parameters: &[u8]);
     fn get_predicate_root_page_num(&self, find_name: &str) -> u32;
     fn get_predicate_last_tuple_id(&self, find_name: &str) -> u32;
@@ -541,21 +596,17 @@ impl CatalogOps for CatalogPage {
                 continue
             }
         };
-        let predicate_size =
-              u8::try_from(FormattedBuf::atom_storage_size(name.len())).unwrap()
-            + U32_SIZE as u8
-            + U32_SIZE as u8
-            + BYTE_SIZE as u8
-            + u8::try_from(parameters.len()).unwrap();
+        let predicate_size = u8::try_from(
+              FormattedBuf::atom_storage_size(name.len())
+            + U32_SIZE
+            + U32_SIZE
+            + FormattedBuf::bytes_storage_size(parameters.len())
+        ).unwrap();
         offset = self.buf.write_u8_offset(offset, predicate_size);
         offset = self.buf.write_atom_offset(offset, name);
         offset = self.buf.write_u32_offset(offset, root_page_num);
         offset = self.buf.write_u32_offset(offset, 0);
-        let arity = u8::try_from(parameters.len()).unwrap();
-        offset = self.buf.write_u8_offset(offset, arity);
-        for i in 0..arity {
-            offset = self.buf.write_u8_offset(offset, parameters[i as usize]);
-        }
+        offset = self.buf.write_bytes_offset(offset, parameters);
         assert!(offset <= PAGE_SIZE_4K - 1, "Catalog page is full");
     }
 
@@ -620,12 +671,7 @@ impl CatalogOps for CatalogPage {
             if stored_name == find_name {
                 let (offset, _) = self.buf.read_u32_offset(offset);
                 let (offset, _) = self.buf.read_u32_offset(offset);
-                let (offset, arity) = self.buf.read_u8_offset(offset);
-                let mut parameters = vec![];
-                for i in 0..arity {
-                    let (_, param) = self.buf.read_u8_offset(offset + i as usize * BYTE_SIZE);
-                    parameters.push(param);
-                }
+                let (_, parameters) = self.buf.read_bytes_offset(offset);
                 break parameters
             } else {
                 continue
@@ -1176,6 +1222,42 @@ impl LeafOps for SlottedPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn it_can_write_and_read_tuple_from_page() {
+        let insert_key = 42;
+        let mut size = 0;
+
+        // tuple schema: (Id: uint, Note: string, N: int, Atom: atom, Buf: bytes)
+        let id = insert_key + 1000;
+        size += FormattedBuf::uint_storage_size();
+        let note = format!("My key is {}", insert_key);
+        size += FormattedBuf::string_storage_size(note.len());
+        let n = -42;
+        size += FormattedBuf::int_storage_size();
+        let atom = "foo";
+        size += FormattedBuf::atom_storage_size(atom.len());
+        let buf = b"hello, world";
+        size += FormattedBuf::bytes_storage_size(buf.len());
+
+        let mut tuple = Tuple::new(size);
+        let offset = tuple.buf.write_u32_offset(0, id);
+        let offset = tuple.buf.write_string_offset(offset, &note);
+        let offset = tuple.buf.write_i32_offset(offset, n);
+        let offset = tuple.buf.write_atom_offset(offset, &atom);
+        tuple.buf.write_bytes_offset(offset, buf);
+
+        let (offset, val) = tuple.buf.read_u32_offset(0);
+        assert_eq!(val, id);
+        let (offset, val) = tuple.buf.read_string_offset(offset);
+        assert_eq!(val, note);
+        let (offset, val) = tuple.buf.read_i32_offset(offset);
+        assert_eq!(val, n);
+        let (offset, val) = tuple.buf.read_atom_offset(offset);
+        assert_eq!(val, atom);
+        let (_, val) = tuple.buf.read_bytes_offset(offset);
+        assert_eq!(val, buf.to_vec());
+    }
 
     #[test]
     fn it_tests_bin_search() {
