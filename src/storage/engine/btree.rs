@@ -8,11 +8,11 @@ use std::cell::RefCell;
 use crate::errors;
 use cursor::BTreeCursor;
 use pager::Pager;
-use format::PageHeader;
-use format::InternalOps;
-use format::LeafOps;
-use format::Tuple;
-use format::SlottedPage;
+use format::page::PageHeader;
+use format::page::InternalOps;
+use format::page::LeafOps;
+use format::page::SlottedPage;
+use format::tuple::Tuple;
 
 #[derive(Clone)]
 pub struct BPlusTree {
@@ -599,8 +599,8 @@ mod tests {
     use std::cell::RefCell;
     use std::env;
     use std::fs;
-    use format::FormattedBuf;
-    use format::SlottedPageBuilder;
+    use format::sizedbuf::SizedBuf;
+    use format::page::SlottedPageBuilder;
 
     struct Fixture {
         temp_path: std::path::PathBuf,
@@ -640,8 +640,8 @@ mod tests {
             );
             for key in keys {
                 let tuple = {
-                    let mut tuple = Tuple::new(FormattedBuf::uint_storage_size());
-                    tuple.buf.write_u32_offset(0, key);
+                    let mut tuple = Tuple::new(SizedBuf::uint_storage_size());
+                    tuple.write_u32_offset(0, key);
                     tuple
                 };
                 btree.insert(key, &tuple).unwrap();
@@ -662,7 +662,7 @@ mod tests {
         // assert can find by key
         let find = btree.find(find_key);
         assert!(find.is_some());
-        let (_, got) = find.unwrap().buf.read_u32_offset(0);
+        let (_, got) = find.unwrap().read_u32_offset(0);
         let want = find_key;
         assert_eq!(got, want);
 
@@ -681,8 +681,8 @@ mod tests {
 
         // assert cannot insert the same key again
         let tuple = {
-            let mut tuple = Tuple::new(FormattedBuf::uint_storage_size());
-            tuple.buf.write_u32_offset(0, insert_key);
+            let mut tuple = Tuple::new(SizedBuf::uint_storage_size());
+            tuple.write_u32_offset(0, insert_key);
             tuple
         };
         let result = btree.insert(insert_key, &tuple);
@@ -703,7 +703,7 @@ mod tests {
             btree
             .into_iter()
             .map(|tuple| {
-                let (_, val) = tuple.buf.read_u32_offset(0);
+                let (_, val) = tuple.read_u32_offset(0);
                 val
             })
             .collect();
@@ -726,7 +726,7 @@ mod tests {
             .into_iter()
             .rev()
             .map(|tuple| {
-                let (_, val) = tuple.buf.read_u32_offset(0);
+                let (_, val) = tuple.read_u32_offset(0);
                 val
             })
             .collect();
@@ -747,7 +747,7 @@ mod tests {
             btree
             .range_scan(6, 69)
             .map(|tuple| {
-                let (_, val) = tuple.buf.read_u32_offset(0);
+                let (_, val) = tuple.read_u32_offset(0);
                 val
             })
             .collect();
@@ -871,7 +871,7 @@ mod tests {
             btree
             .into_iter()
             .map(|tuple| {
-                let (_, val) = tuple.buf.read_u32_offset(0);
+                let (_, val) = tuple.read_u32_offset(0);
                 val
             })
             .collect();
@@ -892,7 +892,7 @@ mod tests {
             btree
             .into_iter()
             .map(|tuple| {
-                let (_, val) = tuple.buf.read_u32_offset(0);
+                let (_, val) = tuple.read_u32_offset(0);
                 val
             })
             .collect();

@@ -11,11 +11,11 @@ use std::path::Path;
 use std::os::unix::fs::OpenOptionsExt;
 
 use crate::storage::engine::btree::format::CatalogPage;
-use crate::storage::engine::btree::format::SlottedPage;
-use crate::storage::engine::btree::format::SlottedPageBuilder;
-use crate::storage::engine::btree::format::PageHeader;
-use crate::storage::engine::btree::format::InternalOps;
-use crate::storage::engine::btree::format::LeafOps;
+use crate::storage::engine::btree::format::page::SlottedPage;
+use crate::storage::engine::btree::format::page::SlottedPageBuilder;
+use crate::storage::engine::btree::format::page::PageHeader;
+use crate::storage::engine::btree::format::page::InternalOps;
+use crate::storage::engine::btree::format::page::LeafOps;
 
 pub struct Pager {
     file: RefCell<File>,

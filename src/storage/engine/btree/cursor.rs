@@ -1,8 +1,8 @@
 use crate::storage::engine::btree::pager::Pager;
 
-use crate::storage::engine::btree::format::PageHeader;
-use crate::storage::engine::btree::format::InternalOps;
-use crate::storage::engine::btree::format::LeafOps;
+use crate::storage::engine::btree::format::page::PageHeader;
+use crate::storage::engine::btree::format::page::InternalOps;
+use crate::storage::engine::btree::format::page::LeafOps;
 
 #[derive(PartialEq, Eq)]
 pub struct BTreeCursor {
@@ -102,13 +102,13 @@ mod tests {
     use std::env;
     use std::fs;
     use crate::storage::engine::btree::cursor::BTreeCursor;
-    use crate::storage::engine::btree::format::InternalOps;
-    use crate::storage::engine::btree::format::PageHeader;
+    use crate::storage::engine::btree::format::page::InternalOps;
+    use crate::storage::engine::btree::format::page::PageHeader;
     use crate::storage::engine::btree::pager::Pager;
-    use crate::storage::engine::btree::format::Tuple;
-    use crate::storage::engine::btree::format::FormattedBuf;
-    use crate::storage::engine::btree::format::LeafOps;
-    use crate::storage::engine::btree::format::SlottedPageBuilder;
+    use crate::storage::engine::btree::format::tuple::Tuple;
+    use crate::storage::engine::btree::format::sizedbuf::SizedBuf;
+    use crate::storage::engine::btree::format::page::LeafOps;
+    use crate::storage::engine::btree::format::page::SlottedPageBuilder;
 
     #[test]
     fn it_creates_cursors_for_tree_with_leaf_root() {
@@ -126,8 +126,8 @@ mod tests {
                 vec![6, 1, 3, 69, 42]
                 .into_iter()
                 .map(|key| {
-                    let mut tuple = Tuple::new(FormattedBuf::uint_storage_size());
-                    tuple.buf.write_u32_offset(0, key * 2);
+                    let mut tuple = Tuple::new(SizedBuf::uint_storage_size());
+                    tuple.write_u32_offset(0, key * 2);
                     (key, tuple)
                 })
                 .collect();
@@ -189,8 +189,8 @@ mod tests {
                 vec![6, 100, 69, 42]
                 .into_iter()
                 .map(|key| {
-                    let mut tuple = Tuple::new(FormattedBuf::uint_storage_size());
-                    tuple.buf.write_u32_offset(0, key * 2);
+                    let mut tuple = Tuple::new(SizedBuf::uint_storage_size());
+                    tuple.write_u32_offset(0, key * 2);
                     (key, tuple)
                 })
                 .collect();
@@ -210,8 +210,8 @@ mod tests {
                 vec![900, 777, 666, 1337]
                 .into_iter()
                 .map(|key| {
-                    let mut tuple = Tuple::new(FormattedBuf::uint_storage_size());
-                    tuple.buf.write_u32_offset(0, key * 2);
+                    let mut tuple = Tuple::new(SizedBuf::uint_storage_size());
+                    tuple.write_u32_offset(0, key * 2);
                     (key, tuple)
                 })
                 .collect();

@@ -2,13 +2,13 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::path::Path;
 
-use crate::storage::engine::btree::format::Tuple;
+use crate::storage::engine::btree::format::tuple::Tuple;
 use crate::storage::engine::btree::BPlusTree;
 use crate::storage::engine::btree::pager::Pager;
 use crate::storage::engine::btree::format::CatalogOps;
-use crate::storage::engine::btree::format::LeafOps;
-use crate::storage::engine::btree::format::SlottedPageBuilder;
-use crate::storage::engine::btree::format::ParameterType;
+use crate::storage::engine::btree::format::page::LeafOps;
+use crate::storage::engine::btree::format::page::SlottedPageBuilder;
+use crate::storage::engine::btree::format::tuple::ParameterType;
 use crate::storage::engine::btree::BPlusTreeIntoIter;
 use crate::errors;
 
