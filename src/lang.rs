@@ -1,5 +1,6 @@
 mod scan;
 mod program;
+mod parsers;
 
 pub use program::Program;
 pub use program::Rule;
