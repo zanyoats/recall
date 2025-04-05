@@ -3,6 +3,7 @@ use crate::storage::engine::btree::pager::Pager;
 use crate::storage::engine::btree::format::page::PageHeader;
 use crate::storage::engine::btree::format::page::InternalOps;
 use crate::storage::engine::btree::format::page::LeafOps;
+use crate::storage::engine::btree::format::page::KeyVal;
 
 #[derive(PartialEq, Eq)]
 pub struct BTreeCursor {
@@ -30,7 +31,7 @@ impl BTreeCursor {
     }
 
     /// find points to the insertion point
-    pub fn find(pager: &mut Pager, root_page_num: u32, key: u32) -> Self {
+    pub fn find(pager: &mut Pager, root_page_num: u32, key: &KeyVal) -> Self {
         let root_node_cell = pager.fetch(root_page_num);
         let root_node = root_node_cell.borrow();
 
@@ -43,7 +44,7 @@ impl BTreeCursor {
         BTreeCursor::new(page_num, tuple_index)
     }
 
-    fn find_internal_node(pager: &mut Pager, page_num: u32, find_key: u32) -> (u32, usize) {
+    fn find_internal_node(pager: &mut Pager, page_num: u32, find_key: &KeyVal) -> (u32, usize) {
         let parent_cell = pager.fetch(page_num);
         let parent = parent_cell.borrow();
         let tuple_index = parent.internal_find_tuple_index(&find_key);
@@ -65,7 +66,7 @@ impl BTreeCursor {
         }
     }
 
-    fn find_leaf_node(pager: &mut Pager, page_num: u32, find_key: u32) -> (u32, usize) {
+    fn find_leaf_node(pager: &mut Pager, page_num: u32, find_key: &KeyVal) -> (u32, usize) {
         let node_cell = pager.fetch(page_num);
         let node = node_cell.borrow();
         let tuple_index = node.leaf_find_tuple_index(&find_key);
@@ -104,36 +105,48 @@ mod tests {
     use crate::storage::engine::btree::cursor::BTreeCursor;
     use crate::storage::engine::btree::format::page::InternalOps;
     use crate::storage::engine::btree::format::page::PageHeader;
-    use crate::storage::engine::btree::pager::Pager;
+    use crate::storage::engine::btree::pager::PagerBuilder;
     use crate::storage::engine::btree::format::tuple::Tuple;
     use crate::storage::engine::btree::format::sizedbuf::SizedBuf;
     use crate::storage::engine::btree::format::page::LeafOps;
-    use crate::storage::engine::btree::format::page::SlottedPageBuilder;
+    use crate::storage::engine::btree::format::page::KeyVal;
+    use crate::storage::engine::btree::format::UINT_TYPE;
+
+    fn u32_key(key: u32) -> KeyVal {
+        let tuple = {
+            let mut tuple = Tuple::new(SizedBuf::uint_storage_size());
+            tuple.write_u32_offset(0, key);
+            tuple
+        };
+        tuple.decode(&[UINT_TYPE])
+    }
 
     #[test]
     fn it_creates_cursors_for_tree_with_leaf_root() {
         let mut temp_path = env::temp_dir();
         temp_path.push("it_creates_cursors_for_tree_with_leaf_root.db");
-        let page_builder = SlottedPageBuilder::new();
-        let mut pager = Pager::open(&temp_path, page_builder);
+        let mut pager =
+            PagerBuilder::new(&temp_path)
+            .build();
         let root_page_num = 0;
 
         {
+            let key_scm = &[UINT_TYPE];
+            let tup_scm = &[UINT_TYPE];
             let root_node_cell = pager.fetch(root_page_num);
             let mut root_node = root_node_cell.borrow_mut();
-            root_node.leaf_initialize_node(true);
-            let pairs: Vec<(u32, Tuple)> =
+            root_node.leaf_initialize_node(true, key_scm, tup_scm);
+            let pairs_iter =
                 vec![6, 1, 3, 69, 42]
                 .into_iter()
                 .map(|key| {
-                    let mut tuple = Tuple::new(SizedBuf::uint_storage_size());
-                    tuple.write_u32_offset(0, key * 2);
-                    (key, tuple)
-                })
-                .collect();
-            for (key, val) in pairs.iter() {
-                let tuple_index: usize = root_node.leaf_find_tuple_index(key);
-                assert!(root_node.leaf_put(key, val, tuple_index).unwrap());
+                    let mut tup = Tuple::new(SizedBuf::uint_storage_size());
+                    tup.write_u32_offset(0, key * 2);
+                    (u32_key(key), tup.decode(tup_scm))
+                });
+            for (key, val) in pairs_iter.clone() {
+                let tuple_index: usize = root_node.leaf_find_tuple_index(&key);
+                assert!(root_node.leaf_put(&key, &val, tuple_index).unwrap());
             }
         }
 
@@ -145,15 +158,15 @@ mod tests {
         assert_eq!(end.page_num, root_page_num);
         assert_eq!(end.tuple_index, 5);
 
-        let find_42 = BTreeCursor::find(&mut pager, root_page_num, 42);
+        let find_42 = BTreeCursor::find(&mut pager, root_page_num, &u32_key(42));
         assert_eq!(find_42.page_num, root_page_num);
         assert_eq!(find_42.tuple_index, 3);
 
-        let find_0 = BTreeCursor::find(&mut pager, root_page_num, 0);
+        let find_0 = BTreeCursor::find(&mut pager, root_page_num, &u32_key(0));
         assert_eq!(find_0.page_num, root_page_num);
         assert_eq!(find_0.tuple_index, 0);
 
-        let find_1337 = BTreeCursor::find(&mut pager, root_page_num, 1337);
+        let find_1337 = BTreeCursor::find(&mut pager, root_page_num, &u32_key(1337));
         assert_eq!(find_1337.page_num, root_page_num);
         assert_eq!(find_1337.tuple_index, 5);
 
@@ -162,10 +175,13 @@ mod tests {
 
     #[test]
     fn it_creates_cursors_for_tree_with_depth_1() {
+        let key_scm = &[UINT_TYPE];
+        let tup_scm = &[UINT_TYPE];
         let mut temp_path = env::temp_dir();
         temp_path.push("it_creates_cursors_for_tree_with_depth_1.db");
-        let page_builder = SlottedPageBuilder::new();
-        let mut pager = Pager::open(&temp_path, page_builder);
+        let mut pager =
+            PagerBuilder::new(&temp_path)
+            .build();
         let root_page_num = 0;
         let left_page_num = 1;
         let right_page_num = 2;
@@ -173,51 +189,49 @@ mod tests {
         { /* setup root node */
             let root_node_cell = pager.fetch(root_page_num);
             let mut root_node = root_node_cell.borrow_mut();
-            root_node.internal_initialize_node(true);
-            let tuple_index = root_node.internal_find_tuple_index(&100);
-            assert!(root_node.internal_put(&100, &left_page_num, tuple_index));
-            root_node.set_right_child(&right_page_num);
+            root_node.internal_initialize_node(true, key_scm);
+            let tuple_index = root_node.internal_find_tuple_index(&u32_key(100));
+            assert!(root_node.internal_put(&u32_key(100), left_page_num, tuple_index).unwrap());
+            root_node.set_right_child(right_page_num);
         }
 
         { /* set up left node */
             let node_cell = pager.fetch(left_page_num);
             let mut node = node_cell.borrow_mut();
-            node.leaf_initialize_node(false);
+            node.leaf_initialize_node(false, key_scm, tup_scm);
             node.set_parent_ptr(root_page_num);
             node.set_r_sibling(right_page_num);
-            let pairs: Vec<(u32, Tuple)> =
+            let pairs_iter=
                 vec![6, 100, 69, 42]
                 .into_iter()
                 .map(|key| {
                     let mut tuple = Tuple::new(SizedBuf::uint_storage_size());
                     tuple.write_u32_offset(0, key * 2);
-                    (key, tuple)
-                })
-                .collect();
-            for (key, val) in pairs.iter() {
-                let tuple_index: usize = node.leaf_find_tuple_index(key);
-                assert!(node.leaf_put(key, val, tuple_index).unwrap());
+                    (u32_key(key), tuple.decode(tup_scm))
+                });
+            for (key, val) in pairs_iter.clone() {
+                let tuple_index: usize = node.leaf_find_tuple_index(&key);
+                assert!(node.leaf_put(&key, &val, tuple_index).unwrap());
             }
         }
 
         { /* set up right node */
             let node_cell = pager.fetch(right_page_num);
             let mut node = node_cell.borrow_mut();
-            node.leaf_initialize_node(false);
+            node.leaf_initialize_node(false, key_scm, tup_scm);
             node.set_parent_ptr(root_page_num);
             node.set_l_sibling(left_page_num);
-            let pairs: Vec<(u32, Tuple)> =
+            let pairs_iter =
                 vec![900, 777, 666, 1337]
                 .into_iter()
                 .map(|key| {
                     let mut tuple = Tuple::new(SizedBuf::uint_storage_size());
                     tuple.write_u32_offset(0, key * 2);
-                    (key, tuple)
-                })
-                .collect();
-            for (key, val) in pairs.iter() {
-                let tuple_index: usize = node.leaf_find_tuple_index(key);
-                assert!(node.leaf_put(key, val, tuple_index).unwrap());
+                    (u32_key(key), tuple.decode(tup_scm))
+                });
+            for (key, val) in pairs_iter.clone() {
+                let tuple_index: usize = node.leaf_find_tuple_index(&key);
+                assert!(node.leaf_put(&key, &val, tuple_index).unwrap());
             }
         }
 
@@ -229,11 +243,11 @@ mod tests {
         assert_eq!(end.page_num, right_page_num);
         assert_eq!(end.tuple_index, 4);
 
-        let find_42 = BTreeCursor::find(&mut pager, root_page_num, 42);
+        let find_42 = BTreeCursor::find(&mut pager, root_page_num, &u32_key(42));
         assert_eq!(find_42.page_num, left_page_num);
         assert_eq!(find_42.tuple_index, 1);
 
-        let find_1337 = BTreeCursor::find(&mut pager, root_page_num, 1337);
+        let find_1337 = BTreeCursor::find(&mut pager, root_page_num, &u32_key(1337));
         assert_eq!(find_1337.page_num, right_page_num);
         assert_eq!(find_1337.tuple_index, 3);
 

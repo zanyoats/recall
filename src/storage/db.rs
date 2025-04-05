@@ -4,10 +4,14 @@ use std::path::Path;
 
 use crate::storage::engine::btree::format::tuple::Tuple;
 use crate::storage::engine::btree::BPlusTree;
+use crate::storage::engine::btree::BPlusTreeBuilder;
 use crate::storage::engine::btree::pager::Pager;
+use crate::storage::engine::btree::pager::PagerBuilder;
 use crate::storage::engine::btree::format::CatalogOps;
 use crate::storage::engine::btree::format::page::LeafOps;
-use crate::storage::engine::btree::format::page::SlottedPageBuilder;
+use crate::storage::engine::btree::format::page::TupVal;
+use crate::storage::engine::btree::format::sizedbuf::SizedBuf;
+use crate::storage::engine::btree::format::UINT_TYPE;
 use crate::storage::engine::btree::format::tuple::ParameterType;
 use crate::storage::engine::btree::BPlusTreeIntoIter;
 use crate::errors;
@@ -23,22 +27,19 @@ pub struct Predicate {
 
 pub struct PredicateIterator {
     btree_iter: BPlusTreeIntoIter,
-    parameters: Vec<u8>,
 }
 
 impl PredicateIterator {
-    pub fn new(btree_iter: BPlusTreeIntoIter, parameters: Vec<u8>) -> Self {
-        PredicateIterator { btree_iter, parameters }
+    pub fn new(btree_iter: BPlusTreeIntoIter) -> Self {
+        PredicateIterator { btree_iter }
     }
 }
 
 impl DB {
     pub fn new<P: AsRef<Path>>(file_path: P) -> Self {
-        // let f = Path::new(file_path);
-        let page_builder =
-            SlottedPageBuilder::new()
-            .split_strategy_empty_page();
-        let pager = Pager::open(file_path, page_builder);
+        let pager =
+            PagerBuilder::new(file_path)
+            .build();
 
         // TODO: fix
         // reserve dummy page for first page
@@ -49,17 +50,20 @@ impl DB {
         }
     }
 
-    pub fn create_predicate(&mut self, name: &str, parameters: &[u8]) -> Predicate {
+    pub fn create_predicate(&mut self, name: &str, key_scm: &[u8], tup_scm: &[u8]) -> Predicate {
         let root_page_num = {
             let mut pager = self.pager.borrow_mut();
             let root_page_num = pager.get_fresh_page_num();
             let root_cell = pager.fetch(root_page_num);
             let mut root = root_cell.borrow_mut();
-            root.leaf_initialize_node(true);
-            pager.catalog.define_predicate(root_page_num, name, parameters);
+            root.leaf_initialize_node(true, key_scm, tup_scm);
+            pager.catalog.define_predicate(root_page_num, name);
             root_page_num
         };
-        let btree = BPlusTree::new(Rc::clone(&self.pager), root_page_num);
+        let btree =
+            BPlusTreeBuilder::new(Rc::clone(&self.pager), root_page_num)
+            .split_strategy_empty_page()
+            .build();
         Predicate::new(name.to_string(), btree)
     }
 
@@ -68,7 +72,10 @@ impl DB {
             let pager = self.pager.borrow();
             pager.catalog.get_predicate_root_page_num(name)
         };
-        let btree = BPlusTree::new(Rc::clone(&self.pager), root_page_num);
+        let btree =
+            BPlusTreeBuilder::new(Rc::clone(&self.pager), root_page_num)
+            .split_strategy_empty_page()
+            .build();
         Predicate::new(name.to_string(), btree)
     }
 
@@ -84,28 +91,19 @@ impl Predicate {
     }
 
     pub fn iter_owned(&self) -> PredicateIterator {
-        let parameters = {
-            let pager = self.btree.pager.borrow_mut();
-            pager.catalog.get_predicate_parameters(&self.name)
-        };
-        PredicateIterator::new(self.btree.clone().into_iter(), parameters)
+        PredicateIterator::new(self.btree.clone().into_iter())
     }
 
-    pub fn assert(&self, input: &[ParameterType]) -> Result<(), errors::RecallError> {
-        if input.len() == 0 {
-            return Err(errors::RecallError::TypeError(format!("TypeError: zero arity predicate can't be inserted")));
-        }
-        let (key, parameters) = {
-            let pager = self.btree.pager.borrow_mut();
-            let parameters = pager.catalog.get_predicate_parameters(&self.name);
+    //TODO: check types in btree.insert
+    pub fn assert(&self, input: &TupVal) -> Result<(), errors::RecallError> {
+        let key = {
+            let mut tuple = Tuple::new(SizedBuf::uint_storage_size());
+            let pager = self.btree.pager.borrow();
             let key = pager.catalog.get_predicate_last_tuple_id(&self.name);
-            (key, parameters)
+            tuple.write_u32_offset(0, key);
+            tuple.decode(&[UINT_TYPE])
         };
-        if input.len() != parameters.len() {
-            return Err(errors::RecallError::TypeError(format!("TypeError: expected arity {}", parameters.len())));
-        }
-        let tuple = Tuple::encode(input, &parameters)?;
-        self.btree.insert(key, &tuple).unwrap();
+        self.btree.insert(&key, input)?;
         let mut pager = self.btree.pager.borrow_mut();
         pager.catalog.inc_predicate_last_tuple_id(&self.name);
         Ok(())
@@ -121,7 +119,7 @@ impl Iterator for PredicateIterator {
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(tuple) = self.btree_iter.next() {
-            Some(tuple.decode(&self.parameters))
+            Some(tuple)
         } else {
             None
         }
@@ -134,7 +132,10 @@ mod tests {
     use std::env;
     use std::fs;
 
-    use crate::storage::engine::btree::format::CatalogPage;
+    use crate::storage::engine::btree::format::ATOM_TYPE;
+    use crate::storage::engine::btree::format::STRING_TYPE;
+    use crate::storage::engine::btree::format::UINT_TYPE;
+    use crate::storage::engine::btree::format::INT_TYPE;
 
     struct Fixture {
         temp_path: std::path::PathBuf,
@@ -161,7 +162,9 @@ mod tests {
         let fixture = Fixture::new("it_can_create_predicates_and_use_them.db");
         let mut db = DB::new(&fixture.temp_path);
 
-        let pred = db.create_predicate("foo", &vec![CatalogPage::ATOM_TYPE, CatalogPage::INT_TYPE]);
+        let key_scm = &[UINT_TYPE];
+
+        let pred = db.create_predicate("foo", key_scm, &vec![ATOM_TYPE, INT_TYPE]);
         pred.assert(&vec![
             ParameterType::Atom("apple".to_string()),
             ParameterType::Int(42),
@@ -172,7 +175,7 @@ mod tests {
             ParameterType::Int(1337),
         ]).unwrap();
 
-        let pred = db.create_predicate("bar", &vec![CatalogPage::STRING_TYPE, CatalogPage::INT_TYPE, CatalogPage::UINT_TYPE]);
+        let pred = db.create_predicate("bar", key_scm, &vec![STRING_TYPE, INT_TYPE, UINT_TYPE]);
         pred.assert(&vec![
             ParameterType::String("cake".to_string()),
             ParameterType::Int(2001),

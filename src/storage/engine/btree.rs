@@ -7,32 +7,62 @@ use std::cell::RefCell;
 
 use crate::errors;
 use cursor::BTreeCursor;
+use format::tuple::ParameterType;
 use pager::Pager;
 use format::page::PageHeader;
 use format::page::InternalOps;
 use format::page::LeafOps;
 use format::page::SlottedPage;
-use format::tuple::Tuple;
+use format::page::KeyVal;
+use format::page::TupVal;
+use format::page::SplitStrategy;
+
+pub struct BPlusTreeBuilder {
+    pager: Rc<RefCell<Pager>>,
+    root_page_num: u32,
+    split_strategy: SplitStrategy,
+}
+
+impl BPlusTreeBuilder {
+    pub fn new(pager: Rc<RefCell<Pager>>, root_page_num: u32) -> Self {
+        BPlusTreeBuilder { pager, root_page_num, split_strategy: SplitStrategy::HalfFullPage }
+    }
+
+    pub fn split_strategy_half_full_page(mut self) -> Self {
+        self.split_strategy = SplitStrategy::HalfFullPage;
+        self
+    }
+
+    pub fn split_strategy_empty_page(mut self) -> Self {
+        self.split_strategy = SplitStrategy::EmptyPage;
+        self
+    }
+
+    pub fn build(self) -> BPlusTree {
+        BPlusTree::new(self.pager, self.root_page_num, self.split_strategy)
+    }
+}
 
 #[derive(Clone)]
 pub struct BPlusTree {
     pub pager: Rc<RefCell<Pager>>,
     root_page_num: u32,
+    split_strategy: SplitStrategy,
 }
 
 impl BPlusTree {
-    pub fn new(pager: Rc<RefCell<Pager>>, root_page_num: u32) -> Self {
-        BPlusTree { pager, root_page_num }
+    fn new(pager: Rc<RefCell<Pager>>, root_page_num: u32, split_strategy: SplitStrategy) -> Self {
+        BPlusTree { pager, root_page_num, split_strategy}
     }
 }
 
 impl BPlusTree {
     /// Inserts a key-value pair into the tree.
     /// Splits nodes if needed and updates internal pointers.
-    pub fn insert(&self, key: u32, val: &Tuple) -> Result<(), errors::RecallError> {
+    pub fn insert(&self, key: &KeyVal, val: &TupVal) -> Result<(), errors::RecallError> {
         let mut pager = self.pager.borrow_mut();
         let cursor = cursor::BTreeCursor::find(&mut pager, self.root_page_num, key);
-        leaf_node_insert(&mut pager, cursor.page_num, cursor.tuple_index, key, val)
+        leaf_node_insert(&mut pager, cursor.page_num, cursor.tuple_index, key, val, self.split_strategy)
     }
 
     /// Removes the key from the tree.
@@ -43,33 +73,43 @@ impl BPlusTree {
 
     /// Performs a binary search within each node to find the key.
     /// Always reaches the leaf node (unlike a B-tree, where it may stop earlier).
-    pub fn find(&mut self, find_key: u32) -> Option<Tuple> {
+    pub fn find(&self, key: &KeyVal) -> Result<Option<TupVal>, errors::RecallError> {
         let mut pager = self.pager.borrow_mut();
-        let cursor = cursor::BTreeCursor::find(&mut pager, self.root_page_num, find_key);
+        let cursor = cursor::BTreeCursor::find(&mut pager, self.root_page_num, key);
         let node_cell = &mut pager.fetch(cursor.page_num);
         let node = node_cell.borrow();
+        let (key_scm, _) = node.leaf_key_and_tup_scm();
+        ParameterType::typecheck(key, &key_scm)?;
         if cursor.tuple_index == node.num_tuples() {
-            None
+            Ok(None)
         } else {
             let stored_key = node.leaf_get_key(cursor.tuple_index);
             let val = node.leaf_get_val(cursor.tuple_index);
-            if stored_key == find_key {
-                Some(val)
+            if stored_key == *key {
+                Ok(Some(val))
             } else {
-                None
+                Ok(None)
             }
         }
     }
 
     /// range matching [start_key, stop_key)
-    pub fn range_scan(self, start_key: u32, stop_key: u32) -> BPlusTreeIntoIter {
+    pub fn range_scan(self, start_key: &KeyVal, stop_key: &KeyVal) -> Result<BPlusTreeIntoIter, errors::RecallError> {
         let (front, back) = {
             let mut pager = self.pager.borrow_mut();
             let front = cursor::BTreeCursor::find(&mut pager, self.root_page_num, start_key);
             let back = cursor::BTreeCursor::find(&mut pager, self.root_page_num, stop_key);
             (front, back)
         };
-        BPlusTreeIntoIter::new(self, front, back)
+        {
+            let pager = self.pager.borrow_mut();
+            let node_cell = &mut pager.fetch(front.page_num);
+            let node = node_cell.borrow();
+            let (key_scm, _) = node.leaf_key_and_tup_scm();
+            ParameterType::typecheck(start_key, &key_scm)?;
+            ParameterType::typecheck(stop_key, &key_scm)?;
+        }
+        Ok(BPlusTreeIntoIter::new(self, front, back))
     }
 }
 
@@ -190,7 +230,7 @@ impl BPlusTreeIntoIter {
 }
 
 impl Iterator for BPlusTreeIntoIter {
-    type Item = Tuple;
+    type Item = TupVal;
 
     fn next(&mut self) -> Option<Self::Item> {
         self
@@ -250,7 +290,7 @@ impl<'a> DoubleEndedIterator for BPlusTreeIntoIter {
 }
 
 impl IntoIterator for BPlusTree {
-    type Item = Tuple;
+    type Item = TupVal;
 
     type IntoIter = BPlusTreeIntoIter;
 
@@ -269,18 +309,19 @@ fn internal_node_insert(
     pager: &mut Pager,
     page_num: u32,
     tuple_index: usize,
-    key: u32,
+    key: &KeyVal,
     val: u32,
+    split_strategy: SplitStrategy,
 ) -> Result<(), errors::RecallError> {
     let inserted = {
         let node_cell = pager.fetch(page_num);
         let mut node = node_cell.borrow_mut();
-        node.internal_put(&key, &val, tuple_index)
+        node.internal_put(&key, val, tuple_index)?
     };
     if inserted {
         Ok(())
     } else {
-        split_internal_node_insert(pager, page_num, tuple_index, key, val)
+        split_internal_node_insert(pager, page_num, tuple_index, key, val, split_strategy)
     }
 }
 
@@ -288,8 +329,9 @@ fn leaf_node_insert(
     pager: &mut Pager,
     page_num: u32,
     tuple_index: usize,
-    key: u32,
-    val: &Tuple,
+    key: &KeyVal,
+    val: &TupVal,
+    split_strategy: SplitStrategy,
 ) -> Result<(), errors::RecallError> {
     // The leaf put routine will return false when there is not enough space
     // for the new tuple. It will return err variant for things like key unique
@@ -300,13 +342,13 @@ fn leaf_node_insert(
     let inserted = {
         let node_cell = pager.fetch(page_num);
         let mut node = node_cell.borrow_mut();
-        node.leaf_put(&key, val, tuple_index)?
+        node.leaf_put(key, val, tuple_index)?
     };
 
     if inserted {
         Ok(())
     } else {
-        split_leaf_node_insert(pager, page_num, tuple_index, key, val)
+        split_leaf_node_insert(pager, page_num, tuple_index, key, val, split_strategy)
     }
 }
 
@@ -332,8 +374,9 @@ fn split_internal_node_insert(
     pager: &mut Pager,
     page_num: u32,
     tuple_index: usize,
-    key: u32,
+    key: &KeyVal,
     val: u32,
+    split_strategy: SplitStrategy,
 ) -> Result<(), errors::RecallError> {
     let is_root_node = {
         let right_node_cell = pager.fetch(page_num);
@@ -348,12 +391,13 @@ fn split_internal_node_insert(
         let right_node = right_node_cell.borrow_mut();
         // save some values from right node needed below
         let right_child_page_num = right_node.right_child();
+        let key_scm = &right_node.internal_key_scm();
 
         // get a fresh node for the left child
         let left_node_page_num = pager.get_fresh_page_num();
         let left_node_cell = pager.fetch(left_node_page_num);
         let mut left_node = left_node_cell.borrow_mut();
-        left_node.internal_initialize_node(false);
+        left_node.internal_initialize_node(false, key_scm);
         left_node.set_parent_ptr(page_num);
 
         // also, get a fresh node for the right child since the right node
@@ -361,9 +405,9 @@ fn split_internal_node_insert(
         let new_right_node_page_num = pager.get_fresh_page_num();
         let new_right_node_cell = pager.fetch(new_right_node_page_num);
         let mut new_right_node = new_right_node_cell.borrow_mut();
-        new_right_node.internal_initialize_node(false);
+        new_right_node.internal_initialize_node(false, key_scm);
         new_right_node.set_parent_ptr(page_num);
-        new_right_node.set_right_child(&right_child_page_num);
+        new_right_node.set_right_child(right_child_page_num);
 
         // internal split routine
         let num = right_node.num_tuples();
@@ -374,13 +418,14 @@ fn split_internal_node_insert(
             &mut new_right_node,
             tuple_index,
             key,
-            &val,
-        );
+            val,
+            split_strategy,
+        )?;
 
         // move right node into new_root
         let mut new_root = right_node;
-        new_root.internal_initialize_node(true);
-        new_root.set_right_child(&new_right_node_page_num);
+        new_root.internal_initialize_node(true, key_scm);
+        new_root.set_right_child(new_right_node_page_num);
 
         // fix the right child ptr for the left node
         let new_parent_key = {
@@ -388,7 +433,7 @@ fn split_internal_node_insert(
             assert!(num > 1);
             let new_parent_key = left_node.internal_get_key(num - 1);
             let child_page_num = left_node.internal_get_val(num - 1);
-            left_node.set_right_child(&child_page_num);
+            left_node.set_right_child(child_page_num);
             left_node.dec_num_tuples();
             new_parent_key
         };
@@ -399,7 +444,7 @@ fn split_internal_node_insert(
 
         // insert new node key/pair into parent
         let tuple_index = new_root.internal_find_tuple_index(&new_parent_key);
-        assert!(new_root.internal_put(&new_parent_key, &left_node_page_num, tuple_index));
+        assert!(new_root.internal_put(&new_parent_key, left_node_page_num, tuple_index)?);
 
         Ok(())
     } else {
@@ -410,11 +455,12 @@ fn split_internal_node_insert(
             // save some values from right node needed below
             let parent_page_num = right_node.parent_ptr();
             let right_child_page_num = right_node.right_child();
+            let key_scm = &right_node.internal_key_scm();
 
             // get a fresh node for the left child
             let left_node_cell = pager.fetch(left_node_page_num);
             let mut left_node = left_node_cell.borrow_mut();
-            left_node.internal_initialize_node(false);
+            left_node.internal_initialize_node(false, key_scm);
             left_node.set_parent_ptr(parent_page_num);
 
             // split right node with left node (new node)
@@ -426,16 +472,17 @@ fn split_internal_node_insert(
                 let mut copy = pager.get_empty_page();
                 SlottedPage::copy(&right_node, &mut copy);
                 // re-initialize right node
-                right_node.internal_initialize_node(false);
-                right_node.set_right_child(&right_child_page_num);
+                right_node.internal_initialize_node(false, key_scm);
+                right_node.set_right_child(right_child_page_num);
                 copy.internal_split_into(
                     pivot_index,
                     &mut left_node,
                     &mut right_node,
                     tuple_index,
                     key,
-                    &val,
-                );
+                    val,
+                    split_strategy,
+                )?;
             }
 
             // fix the right child ptr for the left node
@@ -444,7 +491,7 @@ fn split_internal_node_insert(
                 assert!(num > 1);
                 let new_parent_key = left_node.internal_get_key(num - 1);
                 let child_page_num = left_node.internal_get_val(num - 1);
-                left_node.set_right_child(&child_page_num);
+                left_node.set_right_child(child_page_num);
                 left_node.dec_num_tuples();
                 new_parent_key
             };
@@ -463,8 +510,9 @@ fn split_internal_node_insert(
             pager,
             parent_page_num,
             tuple_index,
-            new_parent_key,
-            left_node_page_num
+            &new_parent_key,
+            left_node_page_num,
+            split_strategy,
         )
     }
 }
@@ -473,8 +521,9 @@ fn split_leaf_node_insert(
     pager: &mut Pager,
     page_num: u32,
     tuple_index: usize,
-    key: u32,
-    val: &Tuple,
+    key: &KeyVal,
+    val: &TupVal,
+    split_strategy: SplitStrategy,
 ) -> Result<(), errors::RecallError> {
     let is_root_node = {
         let right_node_cell = pager.fetch(page_num);
@@ -487,19 +536,20 @@ fn split_leaf_node_insert(
     if is_root_node {
         let right_node_cell = pager.fetch(page_num);
         let right_node = right_node_cell.borrow_mut();
+        let (key_scm, tup_scm) = &right_node.leaf_key_and_tup_scm();
 
         // get a fresh node for the left child
         let left_node_page_num = pager.get_fresh_page_num();
         let left_node_cell = pager.fetch(left_node_page_num);
         let mut left_node = left_node_cell.borrow_mut();
-        left_node.leaf_initialize_node(false);
+        left_node.leaf_initialize_node(false, key_scm, tup_scm);
 
         // also, get a fresh node for the right child since the right node
         // will become the new root
         let new_right_node_page_num = pager.get_fresh_page_num();
         let new_right_node_cell = pager.fetch(new_right_node_page_num);
         let mut new_right_node = new_right_node_cell.borrow_mut();
-        new_right_node.leaf_initialize_node(false);
+        new_right_node.leaf_initialize_node(false, key_scm, tup_scm);
 
         // leaf split routine
         let num = right_node.num_tuples();
@@ -511,12 +561,13 @@ fn split_leaf_node_insert(
             tuple_index,
             key,
             val,
+            split_strategy,
         )?;
 
         // move right node into new_root
         let mut new_root = right_node;
-        new_root.internal_initialize_node(true);
-        new_root.set_right_child(&new_right_node_page_num);
+        new_root.internal_initialize_node(true, key_scm);
+        new_root.set_right_child(new_right_node_page_num);
 
         new_right_node.set_parent_ptr(page_num);
         new_right_node.set_l_sibling(left_node_page_num);
@@ -526,7 +577,7 @@ fn split_leaf_node_insert(
         // insert new node key/pair into parent
         let new_parent_key = left_node.max_key().unwrap();
         let tuple_index = new_root.leaf_find_tuple_index(&new_parent_key);
-        assert!(new_root.internal_put(&new_parent_key, &left_node_page_num, tuple_index));
+        assert!(new_root.internal_put(&new_parent_key, left_node_page_num, tuple_index)?);
 
         Ok(())
     } else {
@@ -537,11 +588,12 @@ fn split_leaf_node_insert(
             // save some values from right node needed below
             let parent_page_num = right_node.parent_ptr();
             let left_sibling_page_num = right_node.l_sibling();
+            let (key_scm, tup_scm) = &right_node.leaf_key_and_tup_scm();
 
             // get a fresh node for the left child
             let left_node_cell = pager.fetch(left_node_page_num);
             let mut left_node = left_node_cell.borrow_mut();
-            left_node.leaf_initialize_node(false);
+            left_node.leaf_initialize_node(false, key_scm, tup_scm);
             left_node.set_parent_ptr(parent_page_num);
 
             // split right node with left node (new node)
@@ -553,7 +605,7 @@ fn split_leaf_node_insert(
                 let mut copy = pager.get_empty_page();
                 SlottedPage::copy(&right_node, &mut copy);
                 // re-initialize right node
-                right_node.leaf_initialize_node(false);
+                right_node.leaf_initialize_node(false, key_scm, tup_scm);
                 copy.leaf_split_into(
                     pivot_index,
                     &mut left_node,
@@ -561,6 +613,7 @@ fn split_leaf_node_insert(
                     tuple_index,
                     key,
                     val,
+                    split_strategy
                 )?;
             }
 
@@ -586,8 +639,9 @@ fn split_leaf_node_insert(
             pager,
             parent_page_num,
             tuple_index,
-            new_parent_key,
+            &new_parent_key,
             left_node_page_num,
+            split_strategy
         )
     }
 }
@@ -600,22 +654,31 @@ mod tests {
     use std::env;
     use std::fs;
     use format::sizedbuf::SizedBuf;
-    use format::page::SlottedPageBuilder;
+    use format::ATOM_TYPE;
+    use format::UINT_TYPE;
+    use format::INT_TYPE;
+    use format::tuple::Tuple;
+    use format::tuple::ParameterType;
+    use super::pager::PagerBuilder;
+
+    fn u32_key(key: u32) -> KeyVal {
+        let tuple = {
+            let mut tuple = Tuple::new(SizedBuf::uint_storage_size());
+            tuple.write_u32_offset(0, key);
+            tuple
+        };
+        tuple.decode(&[UINT_TYPE])
+    }
 
     struct Fixture {
         temp_path: std::path::PathBuf,
-        pager: Rc<RefCell<Pager>>,
     }
 
     impl Fixture {
-        fn new(file_name: &str, page_builder: SlottedPageBuilder) -> Self {
+        fn new(file_name: &str) -> Self {
             let mut temp_path = env::temp_dir();
             temp_path.push(file_name);
-            let pager = Pager::open(&temp_path, page_builder);
-            Fixture {
-                temp_path,
-                pager: Rc::new(RefCell::new(pager)),
-            }
+            Fixture { temp_path }
         }
     }
 
@@ -625,144 +688,177 @@ mod tests {
         }
     }
 
-    impl Fixture {
-        fn build_tree_from_keys(&mut self, keys: impl Iterator<Item = u32>) -> BPlusTree {
-            let root_page_num = 0;
-            {
-                let pager = self.pager.borrow_mut();
-                let root_node_cell = pager.fetch(root_page_num);
-                let mut root_node = root_node_cell.borrow_mut();
-                root_node.leaf_initialize_node(true);
-            }
-            let btree = BPlusTree::new(
-                Rc::clone(&self.pager),
-                root_page_num,
-            );
-            for key in keys {
-                let tuple = {
-                    let mut tuple = Tuple::new(SizedBuf::uint_storage_size());
-                    tuple.write_u32_offset(0, key);
-                    tuple
-                };
-                btree.insert(key, &tuple).unwrap();
-            }
-            btree
+    fn build_tree_from_keys(btree: &mut BPlusTree, keys: impl Iterator<Item = u32>) {
+        let key_scm = &[UINT_TYPE];
+        let tup_scm = &[UINT_TYPE];
+        {
+            let pager = btree.pager.borrow_mut();
+            let root_node_cell = pager.fetch(0);
+            let mut root_node = root_node_cell.borrow_mut();
+            root_node.leaf_initialize_node(true, key_scm, tup_scm);
+        }
+        for key in keys {
+            let tuple = {
+                let mut tuple = Tuple::new(SizedBuf::uint_storage_size());
+                tuple.write_u32_offset(0, key);
+                tuple.decode(tup_scm)
+            };
+            btree.insert(&u32_key(key), &tuple).unwrap();
         }
     }
 
     #[test]
     fn it_can_insert_and_find_leaf_btree() {
-        let page_builder =
-            SlottedPageBuilder::new()
-            .split_strategy_empty_page();
-        let mut fixture = Fixture::new("it_can_insert_and_find_leaf_btree.db", page_builder);
-        let find_key = 42;
-        let mut btree = fixture.build_tree_from_keys(vec![find_key].into_iter());
+        let fixture = Fixture::new("it_can_insert_and_find_leaf_btree.db");
+        let pager =
+            Rc::new(RefCell::new(
+                PagerBuilder::new(&fixture.temp_path)
+                .build()
+            ));
+        let mut btree =
+            BPlusTreeBuilder::new(Rc::clone(&pager), 0)
+            .split_strategy_empty_page()
+            .build();
+        build_tree_from_keys(&mut btree, vec![42].into_iter());
 
         // assert can find by key
-        let find = btree.find(find_key);
+        let find = btree.find(&u32_key(42));
+        assert!(find.is_ok());
+        let find = find.unwrap();
         assert!(find.is_some());
-        let (_, got) = find.unwrap().read_u32_offset(0);
-        let want = find_key;
+        let got = find.unwrap();
+        let want = vec![ParameterType::UInt(42)];
         assert_eq!(got, want);
 
         // assert can find by key that does exist
-        let find = btree.find(find_key + 1);
-        assert!(find.is_none());
+        let find = btree.find(&u32_key(42 + 1));
+        assert!(find.is_ok());
+        assert!(find.unwrap().is_none());
     }
 
     #[test]
     fn it_will_return_uniq_key_error_on_existing_key() {
-        let page_builder =
-            SlottedPageBuilder::new();
-        let mut fixture = Fixture::new("it_will_return_uniq_key_error_on_existing_key.db", page_builder);
-        let insert_key = 42;
-        let btree = fixture.build_tree_from_keys(vec![insert_key].into_iter());
+        let fixture = Fixture::new("it_will_return_uniq_key_error_on_existing_key.db");
+        let pager =
+            Rc::new(RefCell::new(
+                PagerBuilder::new(&fixture.temp_path)
+                .build()
+            ));
+        let mut btree =
+            BPlusTreeBuilder::new(Rc::clone(&pager), 0)
+            .split_strategy_empty_page()
+            .build();
+        build_tree_from_keys(&mut btree, vec![42].into_iter());
 
         // assert cannot insert the same key again
         let tuple = {
             let mut tuple = Tuple::new(SizedBuf::uint_storage_size());
-            tuple.write_u32_offset(0, insert_key);
-            tuple
+            tuple.write_u32_offset(0, 42);
+            tuple.decode(&[UINT_TYPE])
         };
-        let result = btree.insert(insert_key, &tuple);
+        let result = btree.insert(&u32_key(42), &tuple);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), errors::RecallError::UniqueKeyError(insert_key));
+        assert_eq!(result.unwrap_err(), errors::RecallError::UniqueKeyError);
     }
 
     #[test]
     fn it_can_iterate_leaf_btree() {
-        let page_builder =
-            SlottedPageBuilder::new()
-            .split_strategy_empty_page();
-        let mut fixture = Fixture::new("it_can_iterate_leaf_btree.db", page_builder);
-        let btree = fixture.build_tree_from_keys(vec![6, 1, 3, 69, 42].into_iter());
+        let fixture = Fixture::new("it_can_iterate_leaf_btree.db");
+        let pager =
+            Rc::new(RefCell::new(
+                PagerBuilder::new(&fixture.temp_path)
+                .build()
+            ));
+        let mut btree =
+            BPlusTreeBuilder::new(Rc::clone(&pager), 0)
+            .split_strategy_empty_page()
+            .build();
+        build_tree_from_keys(&mut btree, vec![6, 1, 3, 69, 42].into_iter());
 
         // assert can iterate them
-        let got: Vec<u32> =
+        let got: Vec<TupVal> =
             btree
             .into_iter()
-            .map(|tuple| {
-                let (_, val) = tuple.read_u32_offset(0);
-                val
-            })
             .collect();
-        let want = vec![1, 3, 6, 42, 69];
+        let want: Vec<TupVal> =
+            vec![1, 3, 6, 42, 69]
+            .into_iter()
+            .map(|x| vec![ParameterType::UInt(x)])
+            .collect();
         assert_eq!(got, want);
     }
 
 
     #[test]
     fn it_can_iterate_leaf_btree_rev() {
-        let page_builder =
-            SlottedPageBuilder::new()
-            .split_strategy_empty_page();
-        let mut fixture = Fixture::new("it_can_iterate_leaf_btree_rev.db", page_builder);
-        let btree = fixture.build_tree_from_keys(vec![6, 1, 3, 69, 42].into_iter());
+        let fixture = Fixture::new("it_can_iterate_leaf_btree_rev.db");
+        let pager =
+            Rc::new(RefCell::new(
+                PagerBuilder::new(&fixture.temp_path)
+                .build()
+            ));
+        let mut btree =
+            BPlusTreeBuilder::new(Rc::clone(&pager), 0)
+            .split_strategy_empty_page()
+            .build();
+        build_tree_from_keys(&mut btree, vec![6, 1, 3, 69, 42].into_iter());
 
         // assert can iterate them
-        let got: Vec<u32> =
+        let got: Vec<TupVal> =
             btree
             .into_iter()
             .rev()
-            .map(|tuple| {
-                let (_, val) = tuple.read_u32_offset(0);
-                val
-            })
             .collect();
-        let want = vec![69, 42, 6, 3, 1];
+        let want: Vec<TupVal> =
+            vec![69, 42, 6, 3, 1]
+            .into_iter()
+            .map(|x| vec![ParameterType::UInt(x)])
+            .collect();
         assert_eq!(got, want);
     }
 
     #[test]
     fn it_can_range_scan_leaf_btree() {
-        let page_builder =
-            SlottedPageBuilder::new()
-            .split_strategy_empty_page();
-        let mut fixture = Fixture::new("it_can_range_scan_leaf_btree.db", page_builder);
-        let btree = fixture.build_tree_from_keys(vec![6, 1, 3, 69, 42].into_iter());
+        let fixture = Fixture::new("it_can_range_scan_leaf_btree.db");
+        let pager =
+            Rc::new(RefCell::new(
+                PagerBuilder::new(&fixture.temp_path)
+                .build()
+            ));
+        let mut btree =
+            BPlusTreeBuilder::new(Rc::clone(&pager), 0)
+            .split_strategy_empty_page()
+            .build();
+        build_tree_from_keys(&mut btree, vec![6, 1, 3, 69, 42].into_iter());
 
         // assert can iterate them
-        let got: Vec<u32> =
+        let got: Vec<TupVal> =
             btree
-            .range_scan(6, 69)
-            .map(|tuple| {
-                let (_, val) = tuple.read_u32_offset(0);
-                val
-            })
+            .range_scan(&u32_key(6), &u32_key(69))
+            .unwrap()
             .collect();
-        let want = vec![6, 42];
+        let want: Vec<TupVal> =
+            vec![6, 42]
+            .into_iter()
+            .map(|x| vec![ParameterType::UInt(x)])
+            .collect();
         assert_eq!(got, want);
     }
 
     #[test]
     fn it_can_split_leaf_root_insert() {
-        let page_builder =
-            SlottedPageBuilder::new()
-            .cap_limit(Some(5))
-            .split_strategy_empty_page();
-        let mut fixture = Fixture::new("it_can_split_leaf_root_insert.db", page_builder);
-        let btree = fixture.build_tree_from_keys(vec![1, 3, 6, 42, 69, /*causes split:*/ 1337].into_iter());
+        let fixture = Fixture::new("it_can_split_leaf_root_insert.db");
+        let pager =
+            Rc::new(RefCell::new(
+                PagerBuilder::new(&fixture.temp_path)
+                .cap_limit(Some(5))
+                .build()
+            ));
+        let mut btree =
+            BPlusTreeBuilder::new(Rc::clone(&pager), 0)
+            .split_strategy_empty_page()
+            .build();
+        build_tree_from_keys(&mut btree, vec![1, 3, 6, 42, 69, /*causes split:*/ 1337].into_iter());
 
         let pager = btree.pager.borrow_mut();
         assert_eq!(pager.pages.borrow().len(), 3);
@@ -777,7 +873,7 @@ mod tests {
             assert_ne!(root_node.right_child(), format::NULL_PTR);
             assert!(root_node.is_root_node());
             assert!(!root_node.is_leaf_node());
-            assert_eq!(root_node.internal_get_key(0), 69);
+            assert_eq!(root_node.internal_get_key(0), u32_key(69));
             (root_node.internal_get_val(0), root_node.right_child())
         };
 
@@ -791,11 +887,11 @@ mod tests {
             assert!(node.is_leaf_node());
             assert_eq!(node.r_sibling(), right_child_page_num);
             assert_eq!(node.l_sibling(), format::NULL_PTR);
-            assert_eq!(node.leaf_get_key(0), 1);
-            assert_eq!(node.leaf_get_key(1), 3);
-            assert_eq!(node.leaf_get_key(2), 6);
-            assert_eq!(node.leaf_get_key(3), 42);
-            assert_eq!(node.leaf_get_key(4), 69);
+            assert_eq!(node.leaf_get_key(0), u32_key(1));
+            assert_eq!(node.leaf_get_key(1), u32_key(3));
+            assert_eq!(node.leaf_get_key(2), u32_key(6));
+            assert_eq!(node.leaf_get_key(3), u32_key(42));
+            assert_eq!(node.leaf_get_key(4), u32_key(69));
         }
 
         // assert right node is correct
@@ -808,20 +904,24 @@ mod tests {
             assert!(node.is_leaf_node());
             assert_eq!(node.r_sibling(), format::NULL_PTR);
             assert_eq!(node.l_sibling(), left_child_page_num);
-            assert_eq!(node.leaf_get_key(0), 1337);
+            assert_eq!(node.leaf_get_key(0), u32_key(1337));
         }
     }
 
     #[test]
     fn it_can_split_internal_root_insert() {
-        let page_builder =
-            SlottedPageBuilder::new()
-            .cap_limit(Some(5))
-            .split_strategy_empty_page();
-        let mut fixture = Fixture::new("it_can_split_internal_root_insert.db", page_builder);
-        let btree = fixture.build_tree_from_keys((0..31).into_iter());
-
-        // println!("{}", btree.pager.get_dot_string());
+        let fixture = Fixture::new("it_can_split_internal_root_insert.db");
+        let pager =
+            Rc::new(RefCell::new(
+                PagerBuilder::new(&fixture.temp_path)
+                .cap_limit(Some(5))
+                .build()
+            ));
+        let mut btree =
+            BPlusTreeBuilder::new(Rc::clone(&pager), 0)
+            .split_strategy_empty_page()
+            .build();
+        build_tree_from_keys(&mut btree, (0..31).into_iter());
 
         // assert root node is correct
         let root_page_num = 0;
@@ -834,7 +934,7 @@ mod tests {
             assert_ne!(root_node.right_child(), format::NULL_PTR);
             assert!(root_node.is_root_node());
             assert!(!root_node.is_leaf_node());
-            assert_eq!(root_node.internal_get_key(0), 24);
+            assert_eq!(root_node.internal_get_key(0), u32_key(24));
             (root_node.internal_get_val(0), root_node.right_child())
         };
 
@@ -848,10 +948,10 @@ mod tests {
             assert!(!node.is_root_node());
             assert!(!node.is_leaf_node());
             assert_ne!(node.right_child(), format::NULL_PTR);
-            assert_eq!(node.internal_get_key(0), 4);
-            assert_eq!(node.internal_get_key(1), 9);
-            assert_eq!(node.internal_get_key(2), 14);
-            assert_eq!(node.internal_get_key(3), 19);
+            assert_eq!(node.internal_get_key(0), u32_key(4));
+            assert_eq!(node.internal_get_key(1), u32_key(9));
+            assert_eq!(node.internal_get_key(2), u32_key(14));
+            assert_eq!(node.internal_get_key(3), u32_key(19));
         }
 
         // assert right node is correct
@@ -864,40 +964,160 @@ mod tests {
             assert!(!node.is_root_node());
             assert!(!node.is_leaf_node());
             assert_ne!(node.right_child(), format::NULL_PTR);
-            assert_eq!(node.internal_get_key(0), 29);
+            assert_eq!(node.internal_get_key(0), u32_key(29));
         }
 
-        let got: Vec<u32> =
+        let got: Vec<TupVal> =
             btree
             .into_iter()
-            .map(|tuple| {
-                let (_, val) = tuple.read_u32_offset(0);
-                val
-            })
             .collect();
-        let want: Vec<u32> = (0..31).collect();
+        let want: Vec<TupVal> =
+            (0..31)
+            .map(|x| {vec![ParameterType::UInt(x)]})
+            .collect();
 
         assert_eq!(got, want);
     }
 
     #[test]
     fn it_works_on_100_keys() {
-        let page_builder =
-            SlottedPageBuilder::new()
-            .cap_limit(Some(5))
-            .split_strategy_empty_page();
-        let mut fixture = Fixture::new("foo_bar.db", page_builder);
-        let btree = fixture.build_tree_from_keys((0..100).into_iter());
-        let got: Vec<u32> =
+        let fixture = Fixture::new("it_works_on_100_keys.db");
+        let pager =
+            Rc::new(RefCell::new(
+                PagerBuilder::new(&fixture.temp_path)
+                .cap_limit(Some(5))
+                .build()
+            ));
+        let mut btree =
+            BPlusTreeBuilder::new(Rc::clone(&pager), 0)
+            .split_strategy_empty_page()
+            .build();
+        build_tree_from_keys(&mut btree, (0..100).into_iter());
+
+        let got: Vec<TupVal> =
             btree
             .into_iter()
-            .map(|tuple| {
-                let (_, val) = tuple.read_u32_offset(0);
-                val
-            })
             .collect();
-        let want: Vec<u32> = (0..100).collect();
+        let want: Vec<TupVal> =
+            (0..100)
+            .map(|x| {vec![ParameterType::UInt(x)]})
+            .collect();
 
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn it_creates_a_btree_simulating_predicate_backed_storage() {
+        let fixture = Fixture::new("it_creates_a_btree_simulating_predicate_backed_storage.db");
+        let pager =
+            Rc::new(RefCell::new(
+                PagerBuilder::new(&fixture.temp_path)
+                .build()
+            ));
+        let btree =
+            BPlusTreeBuilder::new(Rc::clone(&pager), 0)
+            .split_strategy_empty_page()
+            .build();
+
+        // build the btree
+        let key_scm = &[UINT_TYPE];
+        let tup_scm = &[ATOM_TYPE, INT_TYPE];
+        {
+            let pager = btree.pager.borrow_mut();
+            let root_node_cell = pager.fetch(0);
+            let mut root_node = root_node_cell.borrow_mut();
+            root_node.leaf_initialize_node(true, key_scm, tup_scm);
+        }
+        for key in 0..10 {
+            let tuple = {
+                let atom = "hello_world";
+                let storage_size =
+                    SizedBuf::atom_storage_size(atom.len()) +
+                    SizedBuf::int_storage_size();
+                let mut tuple = Tuple::new(storage_size);
+                let offset = tuple.write_atom_offset(0, atom);
+                tuple.write_i32_offset(offset, key as i32);
+                tuple.decode(tup_scm)
+            };
+            btree.insert(&u32_key(key), &tuple).unwrap();
+        }
+
+        let got: Vec<TupVal> =
+            btree
+            .into_iter()
+            .collect();
+        let want: Vec<TupVal> =
+            (0..10)
+            .into_iter()
+            .map(|x| vec![ParameterType::Atom("hello_world".to_string()), ParameterType::Int(x)])
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn it_creates_a_btree_simulating_secondary_index_backed_storage() {
+        let fixture = Fixture::new("it_creates_a_btree_simulating_secondary_index_backed_storage.db");
+        let pager =
+            Rc::new(RefCell::new(
+                PagerBuilder::new(&fixture.temp_path)
+                .build()
+            ));
+        let btree =
+            BPlusTreeBuilder::new(Rc::clone(&pager), 0)
+            .split_strategy_half_full_page()
+            .build();
+
+        // build the btree
+        let key_scm = &[ATOM_TYPE, INT_TYPE];
+        let tup_scm = &[UINT_TYPE];
+        {
+            let pager = btree.pager.borrow_mut();
+            let root_node_cell = pager.fetch(0);
+            let mut root_node = root_node_cell.borrow_mut();
+            root_node.leaf_initialize_node(true, key_scm, tup_scm);
+        }
+        for key in 0..10 {
+            let key_tup = {
+                let atom = "hello_world";
+                let storage_size =
+                    SizedBuf::atom_storage_size(atom.len()) +
+                    SizedBuf::int_storage_size();
+                let mut tuple = Tuple::new(storage_size);
+                let offset = tuple.write_atom_offset(0, atom);
+                tuple.write_i32_offset(offset, key as i32);
+                tuple.decode(key_scm)
+            };
+            btree.insert(&key_tup, &u32_key(key)).unwrap();
+        }
+
+        let got: Vec<TupVal> =
+            btree
+            .clone()
+            .into_iter()
+            .collect();
+        let want: Vec<TupVal> =
+            (0..10)
+            .into_iter()
+            .map(|x| vec![ParameterType::UInt(x)])
+            .collect();
+        assert_eq!(got, want);
+
+        let key_tup = {
+            let atom = "hello_world";
+            let storage_size =
+                SizedBuf::atom_storage_size(atom.len()) +
+                SizedBuf::int_storage_size();
+            let mut tuple = Tuple::new(storage_size);
+            let offset = tuple.write_atom_offset(0, atom);
+            tuple.write_i32_offset(offset, 6);
+            tuple.decode( key_scm)
+        };
+        let find = btree.find(&key_tup);
+        assert!(find.is_ok());
+        let find = find.unwrap();
+        assert!(find.is_some());
+        let got = find.unwrap();
+        let want = vec![ParameterType::UInt(6)];
         assert_eq!(got, want);
     }
 }

@@ -26,6 +26,10 @@ impl SizedBuf {
         &mut self.data
     }
 
+    pub fn len(&self) -> usize {
+        self.size
+    }
+
     pub fn int_storage_size() -> usize {
         U32_SIZE
     }

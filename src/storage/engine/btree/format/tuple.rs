@@ -3,16 +3,19 @@ use std::ops::DerefMut;
 
 use crate::errors;
 
-use super::CatalogOps;
-use super::CatalogPage;
 use super::sizedbuf::SizedBuf;
+use crate::storage::engine::btree::format::ATOM_TYPE;
+use crate::storage::engine::btree::format::STRING_TYPE;
+use crate::storage::engine::btree::format::UINT_TYPE;
+use crate::storage::engine::btree::format::INT_TYPE;
+use crate::storage::engine::btree::format::BYTES_TYPE;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Tuple {
     buf: SizedBuf,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ParameterType {
     Atom(String),
     String(String),
@@ -30,6 +33,53 @@ impl ParameterType {
             ParameterType::UInt(_) => SizedBuf::uint_storage_size(),
             ParameterType::Int(_) => SizedBuf::int_storage_size(),
         }
+    }
+
+    pub fn typecheck(val: &Vec<Self>, schema: &[u8]) -> Result<(), errors::RecallError> {
+        if val.len() != schema.len() {
+            return Err(errors::RecallError::TypeError(format!("wanted arity of {} got {}", schema.len(), val.len())))
+        }
+
+        for (i, elem) in val.iter().enumerate() {
+            let elem_type = &schema[i];
+            match *elem_type {
+                ATOM_TYPE => {
+                    if let ParameterType::Atom(_) = elem {
+                        continue
+                    }
+                    return Err(errors::RecallError::TypeError(format!("expected tuple position {i} to be typed as atom")))
+                }
+                STRING_TYPE => {
+                    if let ParameterType::String(_) = elem {
+                        continue
+                    }
+                    return Err(errors::RecallError::TypeError(format!("expected tuple position {i} to be typed as string")))
+                }
+                BYTES_TYPE => {
+                    if let ParameterType::Bytes(_) = elem {
+                        continue
+                    }
+                    return Err(errors::RecallError::TypeError(format!("expected tuple position {i} to be typed as bytes")))
+                }
+                UINT_TYPE => {
+                    if let ParameterType::UInt(_) = elem {
+                        continue
+                    }
+                    return Err(errors::RecallError::TypeError(format!("expected tuple position {i} to be typed as uint")))
+                }
+                INT_TYPE => {
+                    if let ParameterType::Int(_) = elem {
+                        continue
+                    }
+                    return Err(errors::RecallError::TypeError(format!("expected tuple position {i} to be typed as int")))
+                }
+                type_spec => {
+                    assert!(false, "invalid type specifier stored {:?}", type_spec)
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -67,43 +117,43 @@ impl Tuple {
             let param_type = &input[i];
 
             match *parameter {
-                CatalogPage::ATOM_TYPE => {
+                ATOM_TYPE => {
                     if let ParameterType::Atom(val) = param_type {
                         offset = tuple.buf.write_atom_offset(offset, &val);
                     } else {
-                        return Err(errors::RecallError::TypeError(format!("TypeError: predicate tuple position {} expected type atom", i)));
+                        return Err(errors::RecallError::TypeError(format!("predicate tuple position {} expected type atom", i)));
                     }
                 }
-                CatalogPage::STRING_TYPE => {
+                STRING_TYPE => {
                     if let ParameterType::String(val) = param_type {
                         offset = tuple.buf.write_string_offset(offset, &val);
                     } else {
-                        return Err(errors::RecallError::TypeError(format!("TypeError: predicate tuple position {} expected type string", i)));
+                        return Err(errors::RecallError::TypeError(format!("predicate tuple position {} expected type string", i)));
                     }
                 }
-                CatalogPage::BYTES_TYPE => {
+                BYTES_TYPE => {
                     if let ParameterType::Bytes(val) = param_type {
                         offset = tuple.buf.write_bytes_offset(offset, &val);
                     } else {
-                        return Err(errors::RecallError::TypeError(format!("TypeError: predicate tuple position {} expected type bytes", i)));
+                        return Err(errors::RecallError::TypeError(format!("predicate tuple position {} expected type bytes", i)));
                     }
                 }
-                CatalogPage::UINT_TYPE => {
+                UINT_TYPE => {
                     if let ParameterType::UInt(val) = param_type {
                         offset = tuple.buf.write_u32_offset(offset, *val);
                     } else {
-                        return Err(errors::RecallError::TypeError(format!("TypeError: predicate tuple position {} expected type unsigned int", i)));
+                        return Err(errors::RecallError::TypeError(format!("predicate tuple position {} expected type unsigned int", i)));
                     }
                 }
-                CatalogPage::INT_TYPE => {
+                INT_TYPE => {
                     if let ParameterType::Int(val) = param_type {
                         offset = tuple.buf.write_i32_offset(offset, *val);
                     } else {
-                        return Err(errors::RecallError::TypeError(format!("TypeError: predicate tuple position {} expected type int", i)));
+                        return Err(errors::RecallError::TypeError(format!("predicate tuple position {} expected type int", i)));
                     }
                 }
                 _ => {
-                    assert!(false, "catalog parameter type is invalid");
+                    assert!(false, "parameter type is invalid");
                 }
             }
         }
@@ -115,33 +165,33 @@ impl Tuple {
         let mut offset: usize = 0;
         for parameter in parameters.iter() {
             match *parameter {
-                CatalogPage::ATOM_TYPE => {
+                ATOM_TYPE => {
                     let (offset1, val) = self.buf.read_atom_offset(offset);
                     result.push(ParameterType::Atom(val));
                     offset = offset1;
                 }
-                CatalogPage::STRING_TYPE => {
+                STRING_TYPE => {
                     let (offset1, val) = self.buf.read_string_offset(offset);
                     result.push(ParameterType::String(val));
                     offset = offset1;
                 }
-                CatalogPage::BYTES_TYPE => {
+                BYTES_TYPE => {
                     let (offset1, val) = self.buf.read_bytes_offset(offset);
                     result.push(ParameterType::Bytes(val));
                     offset = offset1;
                 }
-                CatalogPage::UINT_TYPE => {
+                UINT_TYPE => {
                     let (offset1, val) = self.buf.read_u32_offset(offset);
                     result.push(ParameterType::UInt(val));
                     offset = offset1;
                 }
-                CatalogPage::INT_TYPE => {
+                INT_TYPE => {
                     let (offset1, val) = self.buf.read_i32_offset(offset);
                     result.push(ParameterType::Int(val));
                     offset = offset1;
                 }
                 _ => {
-                    assert!(false, "catalog parameter type is invalid");
+                    assert!(false, "parameter type is invalid");
                 }
             }
         }

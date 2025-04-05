@@ -11,9 +11,9 @@ use recall::lang::Program;
 use recall::lang::Term;
 use recall::storage::db::DB;
 use recall::storage::db::Predicate;
-use recall::storage::engine::btree::format::CatalogOps;
-use recall::storage::engine::btree::format::CatalogPage;
-use recall::storage::engine::btree::format::ParameterType;
+use recall::storage::engine::btree::format::ATOM_TYPE;
+use recall::storage::engine::btree::format::UINT_TYPE;
+use recall::storage::engine::btree::format::tuple::ParameterType;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -44,25 +44,25 @@ fn main() {
 
 fn create_db(file_path: &str) -> DB {
     let mut db = DB::new(file_path);
-    let links = db.create_predicate("links", &vec![
-        CatalogPage::SYMBOL_TYPE,
-        CatalogPage::SYMBOL_TYPE,
+    let links = db.create_predicate("links", &vec![UINT_TYPE], &vec![
+        ATOM_TYPE,
+        ATOM_TYPE,
     ]);
     links.assert(&vec![
-        ParameterType::Symbol("a".to_string()),
-        ParameterType::Symbol("b".to_string()),
+        ParameterType::Atom("a".to_string()),
+        ParameterType::Atom("b".to_string()),
     ]).unwrap();
     links.assert(&vec![
-        ParameterType::Symbol("b".to_string()),
-        ParameterType::Symbol("c".to_string()),
+        ParameterType::Atom("b".to_string()),
+        ParameterType::Atom("c".to_string()),
     ]).unwrap();
     links.assert(&vec![
-        ParameterType::Symbol("c".to_string()),
-        ParameterType::Symbol("c".to_string()),
+        ParameterType::Atom("c".to_string()),
+        ParameterType::Atom("c".to_string()),
     ]).unwrap();
     links.assert(&vec![
-        ParameterType::Symbol("c".to_string()),
-        ParameterType::Symbol("d".to_string()),
+        ParameterType::Atom("c".to_string()),
+        ParameterType::Atom("d".to_string()),
     ]).unwrap();
     db
 }
@@ -149,7 +149,7 @@ fn tuple_2_functor(name: &str, tuple: &[ParameterType]) -> Term {
         tuple
         .iter()
         .map(|arg_type| match arg_type {
-            ParameterType::Symbol(val) => Term::Symbol(val.to_string()),
+            ParameterType::Atom(val) => Term::Atom(val.to_string()),
             _ => { panic!("ahhh") }
         })
         .collect();
