@@ -11,7 +11,6 @@ use std::path::Path;
 use std::os::unix::fs::OpenOptionsExt;
 
 use crate::storage::engine::btree::format::PAGE_SIZE_4K;
-use crate::storage::engine::btree::format::CatalogPage;
 use crate::storage::engine::btree::format::page::SlottedPage;
 use crate::storage::engine::btree::format::page::PageHeader;
 use crate::storage::engine::btree::format::page::InternalOps;
@@ -50,7 +49,6 @@ pub struct Pager {
     file: RefCell<File>,
     pub stored_pages: u32,
     last_page_num: u32,
-    pub catalog: CatalogPage,
     pub pages: RefCell<HashMap<u32, Rc<RefCell<SlottedPage>>>>,
     page_size: usize,
     cap_limit: Option<usize>,
@@ -83,13 +81,10 @@ impl Pager {
         let stored_pages = file_len / page_size;
         let stored_pages = u32::try_from(stored_pages).unwrap();
 
-        let catalog = CatalogPage::new();
-
         Pager {
             file: RefCell::new(file),
             stored_pages,
             last_page_num: if stored_pages == 0 { 0 } else { stored_pages - 1 },
-            catalog,
             pages: RefCell::new(HashMap::new()),
             page_size,
             cap_limit,

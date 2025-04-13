@@ -35,6 +35,46 @@ impl ParameterType {
         }
     }
 
+    pub fn get_atom(&self) -> &str {
+        if let Self::Atom(val) = self {
+            val
+        } else {
+            panic!("expected underlying to be an atom")
+        }
+    }
+
+    pub fn get_string(&self) -> &str {
+        if let Self::String(val) = self {
+            val
+        } else {
+            panic!("expected underlying to be a string")
+        }
+    }
+
+    pub fn get_bytes(&self) -> &[u8] {
+        if let Self::Bytes(val) = self {
+            val
+        } else {
+            panic!("expected underlying to be bytes")
+        }
+    }
+
+    pub fn get_uint(&self) -> u32 {
+        if let Self::UInt(val) = self {
+            *val
+        } else {
+            panic!("expected underlying to be an uint")
+        }
+    }
+
+    pub fn get_int(&self) -> i32 {
+        if let Self::Int(val) = self {
+            *val
+        } else {
+            panic!("expected underlying to be an int")
+        }
+    }
+
     pub fn typecheck(val: &Vec<Self>, schema: &[u8]) -> Result<(), errors::RecallError> {
         if val.len() != schema.len() {
             return Err(errors::RecallError::TypeError(format!("wanted arity of {} got {}", schema.len(), val.len())))

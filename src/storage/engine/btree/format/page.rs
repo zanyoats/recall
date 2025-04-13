@@ -464,6 +464,11 @@ pub trait LeafOps: PageHeader {
         val: &TupVal,
         tuple_index: usize,
     ) -> Result<bool, errors::RecallError>;
+    fn leaf_replace(
+        &mut self,
+        val: &TupVal,
+        tuple_index: usize,
+    ) -> Result<(), errors::RecallError>;
     fn leaf_split_into(
         &self,
         pivot_index: usize,
@@ -664,6 +669,30 @@ impl LeafOps for SlottedPage {
         self.buf.write_u16_offset(Self::LEAF_FREE_END_PTR_OFFSET, key_offset);
 
         Ok(true)
+    }
+
+    fn leaf_replace(
+        &mut self,
+        val: &TupVal,
+        tuple_index: usize,
+    ) -> Result<(), errors::RecallError> {
+        // replace val
+        unsafe {
+            let (key_scm, tup_scm) = &self.leaf_key_and_tup_scm();
+            let val = Tuple::encode(val, tup_scm).unwrap();
+            let header_size = Self::leaf_header_size(&key_scm, &tup_scm);
+            let offset = header_size + tuple_index * Self::LEAF_KEY_STRIDE + U16_SIZE * 2;
+            let (offset, val_offset) = self.buf.read_u16_offset(offset);
+            let (_, val_size) = self.buf.read_u16_offset(offset);
+            assert!(val_size as usize == val.len(), "expected replaced tuple to be exact size of existing tuple");
+            let ptr = self.buf.get_mut().as_mut_ptr().add(val_offset as usize);
+            ptr::copy_nonoverlapping(
+                val.get().as_ptr(),
+                ptr,
+                val_size as usize,
+            );
+            Ok(())
+        }
     }
 
     /// Assumes left and right were initialized already
@@ -1285,7 +1314,6 @@ mod tests {
         );
     }
 
-    // #[ignore = "flaky"]
     #[test]
     fn it_can_typecheck_the_schema() {
         let key_scm = &[UINT_TYPE];
@@ -1316,5 +1344,57 @@ mod tests {
         let result = page.leaf_put(&u32_key(42), &tuple, tuple_index);
         assert!(result.is_ok());
         assert!(result.unwrap())
+    }
+
+    #[test]
+    fn it_can_replace_tuple() {
+        let key_scm = &[UINT_TYPE];
+        let tup_scm = &[UINT_TYPE];
+        let mut page = SlottedPage::new(PAGE_SIZE_4K, None);
+        page.leaf_initialize_node(true, key_scm, tup_scm);
+
+        let pairs_iter =
+            vec![6, 0, 3, 69, 12]
+            .into_iter()
+            .map(|key| {
+                (u32_key(key), u32_key(key + 1000))
+            });
+
+        // put tuples
+        for (key, val) in pairs_iter.clone() {
+            let tuple_index = page.leaf_find_tuple_index(&key);
+            assert!(page.leaf_put(&key, &val, tuple_index).unwrap());
+        }
+
+        // replace tuple for key 69
+        let tuple_index = page.leaf_find_tuple_index(&u32_key(69));
+        let val = page.leaf_get_val(tuple_index);
+        assert_eq!(val, vec![ParameterType::UInt(1069)]);
+        page.leaf_replace(&u32_key(0), tuple_index).unwrap();
+
+        let got =
+            (0..page.num_tuples())
+            .into_iter()
+            .map(|tid| {
+                let key = page.leaf_get_key(tid);
+                let val = page.leaf_get_val(tid);
+                (key, val)
+            })
+            .collect::<Vec<(KeyVal, TupVal)>>();
+        let want =
+            vec![0, 3, 6, 12, 69]
+            .into_iter()
+            .map(|key| {
+                (
+                    u32_key(key),
+                    if key == 69 {
+                        u32_key(0)
+                    } else {
+                        u32_key(key + 1000)
+                    }
+                )
+            })
+            .collect::<Vec<(KeyVal, TupVal)>>();
+        assert_eq!(got, want);
     }
 }

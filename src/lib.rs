@@ -7,5 +7,7 @@ pub mod errors {
     pub enum RecallError {
         TypeError(String),
         UniqueKeyError,
+        PredicateNotFound(String, u32),
+        ReplaceKeyNotFound,
     }
 }

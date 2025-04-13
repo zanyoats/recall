@@ -93,6 +93,27 @@ impl BPlusTree {
         }
     }
 
+    // only used for internal predicates
+    pub fn replace(&self, key: &KeyVal, val: &TupVal) -> Result<(), errors::RecallError> {
+        let mut pager = self.pager.borrow_mut();
+        let cursor = cursor::BTreeCursor::find(&mut pager, self.root_page_num, key);
+        let node_cell = &mut pager.fetch(cursor.page_num);
+        let mut node = node_cell.borrow_mut();
+        let (key_scm, tup_scm) = node.leaf_key_and_tup_scm();
+        ParameterType::typecheck(key, &key_scm)?;
+        ParameterType::typecheck(val, &tup_scm)?;
+        if cursor.tuple_index == node.num_tuples() {
+            Err(errors::RecallError::ReplaceKeyNotFound)
+        } else {
+            let stored_key = node.leaf_get_key(cursor.tuple_index);
+            if stored_key == *key {
+                node.leaf_replace(val, cursor.tuple_index)
+            } else {
+                Err(errors::RecallError::ReplaceKeyNotFound)
+            }
+        }
+    }
+
     /// range matching [start_key, stop_key)
     pub fn range_scan(self, start_key: &KeyVal, stop_key: &KeyVal) -> Result<BPlusTreeIntoIter, errors::RecallError> {
         let (front, back) = {

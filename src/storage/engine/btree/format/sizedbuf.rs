@@ -240,7 +240,7 @@ impl SizedBuf {
     pub fn write_string_offset(&mut self, offset: usize, val: &str) -> usize {
         unsafe {
             let ptr = self.data.as_mut_ptr().add(offset);
-            ptr.cast::<u8>().write(val.len() as u8);
+            ptr.cast::<u8>().write(val.len().try_into().unwrap());
             let ptr = ptr.add(BYTE_SIZE);
             ptr::copy_nonoverlapping(
                 val.as_ptr(),
@@ -278,7 +278,7 @@ impl SizedBuf {
     pub fn write_bytes_offset(&mut self, offset: usize, val: &[u8]) -> usize {
         unsafe {
             let ptr = self.data.as_mut_ptr().add(offset);
-            ptr.cast::<u8>().write(val.len() as u8);
+            ptr.cast::<u8>().write(val.len().try_into().unwrap());
             let ptr = ptr.add(BYTE_SIZE);
             ptr::copy_nonoverlapping(
                 val.as_ptr(),

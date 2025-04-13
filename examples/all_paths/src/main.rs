@@ -12,7 +12,6 @@ use recall::lang::Term;
 use recall::storage::db::DB;
 use recall::storage::db::Predicate;
 use recall::storage::engine::btree::format::ATOM_TYPE;
-use recall::storage::engine::btree::format::UINT_TYPE;
 use recall::storage::engine::btree::format::tuple::ParameterType;
 
 fn main() {
@@ -43,11 +42,11 @@ fn main() {
 }
 
 fn create_db(file_path: &str) -> DB {
-    let mut db = DB::new(file_path);
-    let links = db.create_predicate("links", &vec![UINT_TYPE], &vec![
+    let mut db = DB::new(file_path).unwrap();
+    let links = db.define_predicate("links", vec![
         ATOM_TYPE,
         ATOM_TYPE,
-    ]);
+    ]).unwrap();
     links.assert(&vec![
         ParameterType::Atom("a".to_string()),
         ParameterType::Atom("b".to_string()),
@@ -69,7 +68,7 @@ fn create_db(file_path: &str) -> DB {
 
 fn run_repl(file_path: &str, additional: Option<Program>) {
     let mut db = create_db(file_path);
-    let links = db.get_predicate("links");
+    let links = db.get_predicate("links", 2).unwrap();
     let mut dummy_engine = DummyEngine { predicate: links };
     loop {
         io::stdout()
