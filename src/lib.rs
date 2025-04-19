@@ -9,5 +9,7 @@ pub mod errors {
         UniqueKeyError,
         PredicateNotFound(String, u32),
         ReplaceKeyNotFound,
+        NonLLGrammar(String),
+        ParserError(String),
     }
 }
