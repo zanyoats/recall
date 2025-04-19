@@ -7,5 +7,7 @@ pub mod errors {
     pub enum RecallError {
         TypeError(String),
         UniqueKeyError(u32),
+        NonLLGrammar(String),
+        ParserError(String),
     }
 }

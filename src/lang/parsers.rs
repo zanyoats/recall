@@ -1,16 +1,20 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::iter::zip;
+use std::iter::Peekable;
 use std::slice;
 use std::fmt;
 
+use crate::errors;
+
+#[derive(Debug)]
 struct LLGrammar<'a> {
     non_terminals: HashSet<&'a str>,
     terminals: HashSet<&'a str>,
     table: LLGrammarTable<'a>,
 }
 
-#[derive(Hash, PartialEq, Eq, Clone)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
 struct GrammarRule {
     lhs: String,
     rhs: Vec<String>,
@@ -45,7 +49,7 @@ impl GrammarRule {
 }
 
 impl<'a> LLGrammar<'a> {
-    fn new(grammar: &'a [GrammarRule]) -> Self {
+    fn new(grammar: &'a [GrammarRule]) -> Result<Self, errors::RecallError> {
         let non_terminals: HashSet<&str> =
             grammar
             .iter()
@@ -64,7 +68,31 @@ impl<'a> LLGrammar<'a> {
         let table =
             Self::build_parsing_table(grammar, &non_terminals, &terminals);
 
-        LLGrammar { non_terminals, terminals, table }
+        // check that grammar is unambiguous
+        let mut error = String::new();
+        for non_terminal in non_terminals.iter() {
+            for terminal in terminals.iter() {
+                if let Some(rules) =
+                    table
+                    .get(&(*non_terminal, *terminal))
+                {
+                    if rules.len() > 1 {
+                        error.push_str(&format!("On entry ({}, {}) there are {} rules:\n", *non_terminal, *terminal, rules.len()));
+                        for rule in rules {
+                            error.push('\t');
+                            error.push_str(&rule.to_string());
+                            error.push('\n');
+                        }
+                    }
+                }
+            }
+        }
+
+        if error.len() > 0 {
+            Err(errors::RecallError::NonLLGrammar(format!("Grammar not LL(1)\n{}", error)))
+        } else {
+            Ok(LLGrammar { non_terminals, terminals, table })
+        }
     }
 
     fn terminals_for_rule(rule: &'a GrammarRule, sets: &LLGrammarSets<'a>) -> HashSet<&'a str> {
@@ -110,7 +138,7 @@ impl<'a> LLGrammar<'a> {
         non_terminals: &HashSet<&'a str>,
         terminals: &HashSet<&'a str>,
     ) -> LLGrammarTable<'a> {
-        let mut table: LLGrammarTable<'a>= HashMap::new();
+        let mut table: LLGrammarTable<'a> = HashMap::new();
         let sets = Self::compute_sets(grammar, &non_terminals, &terminals);
 
         for rule in grammar.iter() {
@@ -292,68 +320,64 @@ trait SyntaxTree<E>
     fn children(&self) -> slice::Iter<Self>;
 
     fn parse<'a>(
-        input: &[E],
+        mut input: Peekable<impl Iterator<Item = E>>,
         table: &LLGrammarTable<'a>,
         terminals: &HashSet<&'a str>,
         start_sym: &str,
-    ) -> Self {
+    ) -> Result<Self, errors::RecallError> {
         let mut stack = vec![];
         let mut start = Self::new();
         start.update(E::from_sym(start_sym));
         stack.push((start_sym, &mut start));
 
-        let mut i = 0;
-
         while let Some((sym, pn)) = stack.pop() {
-            if i >= input.len() {
-                assert!(false, "parse error: input ended wanted {sym:?}");
-            }
-            let token = &input[i];
-
-            if terminals.contains(sym) {
-                if token.label() != sym {
-                    assert!(false, "parse error: wanted {sym:?} but got {:?} from input", token.label());
-                }
-
-                pn.update(token.clone());
-
-                i += 1; // consume input
-            } else {
-                if let Some(rules) = table.get(&(sym, &token.label())) {
-                    let rule = rules[0];
-
-                    pn.update(E::from_sym(sym));
-
-                    rule
-                    .rhs
-                    .iter()
-                    .for_each(|_| {
-                        pn.add_child(Self::new());
-                    });
-
-                    for (sym, pn) in zip(
-                        rule.rhs.iter().rev(),
-                        pn.children_mut().rev(),
-                    ) {
-                        stack.push((sym, pn));
+            if let Some(token) = input.peek() {
+                if terminals.contains(sym) {
+                    if token.label() != sym {
+                        return Err(errors::RecallError::ParserError(format!("wanted {:?} but got {:?} from input", sym, token.label())));
                     }
+
+                    pn.update(token.clone());
+
+                    input.next().unwrap(); // consume input
                 } else {
-                    assert!(false, "parse error: no way to parse input {:?} using rule {sym:?}", token.label());
+                    if let Some(rules) = table.get(&(sym, &token.label())) {
+                        let rule = rules[0];
+
+                        pn.update(E::from_sym(sym));
+
+                        rule
+                        .rhs
+                        .iter()
+                        .for_each(|_| {
+                            pn.add_child(Self::new());
+                        });
+
+                        for (sym, pn) in zip(
+                            rule.rhs.iter().rev(),
+                            pn.children_mut().rev(),
+                        ) {
+                            stack.push((sym, pn));
+                        }
+                    } else {
+                        return Err(errors::RecallError::ParserError(format!("no way to parse input {:?} using rule {:?}", token.label(), sym)));
+                    }
                 }
+            } else {
+                return Err(errors::RecallError::ParserError(format!("input ended wanted {:?}", sym)));
             }
         }
 
-        assert!(
-            i == input.len(),
-            "parse error: input parsed completely with remaining input tokens: {:?}",
-            &input[i..]
-            .iter()
-            .map(|e| e.to_string())
-            .collect::<Vec<_>>()
-            .join(", "),
-        );
-
-        start
+        if input.peek().is_none() {
+            Ok(start)
+        } else {
+            let rem =
+                input
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(errors::RecallError::ParserError(format!("input parsed completely with remaining input tokens: {:?}", rem)))
+        }
     }
 
     fn print_tree(&self, indent: usize, print_arrow: bool) {
@@ -554,18 +578,16 @@ mod tests {
                 DatalogToken::End,
             ];
             let grammar = datalog_grammar();
-            let ll = LLGrammar::new(&grammar);
+            let result = LLGrammar::new(&grammar);
+            assert!(result.is_ok());
+            let ll = result.unwrap();
             let pn = DatalogSyntaxTree::parse(
-                &input,
+                input.into_iter().peekable(),
                 &ll.table,
                 &ll.terminals,
                 "Program",
             );
-            println!("");
-            println!("terminals {:?}", ll.terminals);
-            println!("non-terminals {:?}", ll.non_terminals);
-            println!("\n{}", "-".repeat(80));
-            pn.print_tree(0, false);
+            assert!(pn.is_ok());
         }
     }
 
@@ -682,28 +704,22 @@ mod tests {
         }
 
         #[test]
-        fn it_works_on_ll_grammar() {
-            let grammar = simple_arithmetic_grammar();
-            let ll = LLGrammar::new(&grammar);
-            ll.print_table();
-        }
-
-        #[test]
         fn it_can_parse_input_0() {
             let input = vec![
                 SimpleToken::Ident("foo".to_string()),
                 SimpleToken::End,
             ];
             let grammar = simple_arithmetic_grammar();
-            let ll = LLGrammar::new(&grammar);
+            let result = LLGrammar::new(&grammar);
+            assert!(result.is_ok());
+            let ll = result.unwrap();
             let pn = SimpleSyntaxTree::parse(
-                &input,
+                input.into_iter().peekable(),
                 &ll.table,
                 &ll.terminals,
                 "S",
             );
-            println!("\n{}", "-".repeat(80));
-            pn.print_tree(0, false);
+            assert!(pn.is_ok());
         }
 
         #[test]
@@ -715,15 +731,16 @@ mod tests {
                 SimpleToken::End,
             ];
             let grammar = simple_arithmetic_grammar();
-            let ll = LLGrammar::new(&grammar);
+            let result = LLGrammar::new(&grammar);
+            assert!(result.is_ok());
+            let ll = result.unwrap();
             let pn = SimpleSyntaxTree::parse(
-                &input,
+                input.into_iter().peekable(),
                 &ll.table,
                 &ll.terminals,
                 "S",
             );
-            println!("\n{}", "-".repeat(80));
-            pn.print_tree(0, false);
+            assert!(pn.is_ok());
         }
 
         #[test]
@@ -739,45 +756,55 @@ mod tests {
                 SimpleToken::End,
             ];
             let grammar = simple_arithmetic_grammar();
-            let ll = LLGrammar::new(&grammar);
+            let result = LLGrammar::new(&grammar);
+            assert!(result.is_ok());
+            let ll = result.unwrap();
             let pn = SimpleSyntaxTree::parse(
-                &input,
+                input.into_iter().peekable(),
                 &ll.table,
                 &ll.terminals,
                 "S",
             );
-            println!("\n{}", "-".repeat(80));
-            pn.print_tree(0, false);
+            assert!(pn.is_ok());
         }
     }
 
-    fn non_ll_grammar_1() -> Vec<GrammarRule> {
-        vec![
-            // Grammar
-            //
-            // non-terminal symbols are simply keys
-            // terminal symbols are those rhs elements that have no corresponding lhs (production)
-            // S -> Z$
-            GrammarRule::new("S", &["Z", "$"]),         //0
-            // Z -> XYZ
-            // Z -> d
-            GrammarRule::new("Z", &["X", "Y", "Z"]),    //1
-            GrammarRule::new("Z", &["d"]),              //2
-            // Y ->
-            // Y -> c
-            GrammarRule::new("Y", &[]),                 //3
-            GrammarRule::new("Y", &["c"]),              //4
-            // X -> Y
-            // X -> a
-            GrammarRule::new("X", &["Y"]),              //5
-            GrammarRule::new("X", &["a"]),              //6
-        ]
-    }
+    mod non_ll {
+        use super::*;
 
-    #[test]
-    fn it_works_on_non_ll_grammar() {
-        let grammar = non_ll_grammar_1();
-        let ll = LLGrammar::new(&grammar);
-        ll.print_table();
+        fn non_ll_grammar_1() -> Vec<GrammarRule> {
+            vec![
+                // Grammar
+                //
+                // non-terminal symbols are simply keys
+                // terminal symbols are those rhs elements that have no corresponding lhs (production)
+                // S -> Z$
+                GrammarRule::new("S", &["Z", "$"]),         //0
+                // Z -> XYZ
+                // Z -> d
+                GrammarRule::new("Z", &["X", "Y", "Z"]),    //1
+                GrammarRule::new("Z", &["d"]),              //2
+                // Y ->
+                // Y -> c
+                GrammarRule::new("Y", &[]),                 //3
+                GrammarRule::new("Y", &["c"]),              //4
+                // X -> Y
+                // X -> a
+                GrammarRule::new("X", &["Y"]),              //5
+                GrammarRule::new("X", &["a"]),              //6
+            ]
+        }
+
+        #[test]
+        fn it_works_on_non_ll_grammar() {
+            let grammar = non_ll_grammar_1();
+            let result = LLGrammar::new(&grammar);
+            assert!(result.is_err());
+            if let errors::RecallError::NonLLGrammar(m) = result.unwrap_err() {
+                assert!(m.len() > 0);
+            } else {
+                assert!(false, "expected grammar to not be ll(1)");
+            }
+        }
     }
 }
