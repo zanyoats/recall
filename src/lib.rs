@@ -1,7 +1,6 @@
 pub mod lang;
 pub mod storage;
 pub mod eval;
-
 pub mod errors {
     #[derive(Debug, PartialEq, Eq)]
     pub enum RecallError {
@@ -11,5 +10,6 @@ pub mod errors {
         ReplaceKeyNotFound,
         NonLLGrammar(String),
         ParserError(String),
+        ScanError(String),
     }
 }

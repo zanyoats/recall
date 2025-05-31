@@ -1,21 +1,20 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::iter::zip;
-use std::iter::Peekable;
 use std::slice;
 use std::fmt;
 
 use crate::errors;
 
 #[derive(Debug)]
-struct LLGrammar<'a> {
-    non_terminals: HashSet<&'a str>,
-    terminals: HashSet<&'a str>,
-    table: LLGrammarTable<'a>,
+pub struct LLGrammar<'a> {
+    pub non_terminals: HashSet<&'a str>,
+    pub terminals: HashSet<&'a str>,
+    pub table: LLGrammarTable<'a>,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
-struct GrammarRule {
+pub struct GrammarRule {
     lhs: String,
     rhs: Vec<String>,
 }
@@ -36,7 +35,7 @@ type LLGrammarSets<'a> = (
 );
 
 impl GrammarRule {
-    fn new(lhs: &str, rhs: &[&str]) -> Self {
+    pub fn new(lhs: &str, rhs: &[&str]) -> Self {
         let rhs: Vec<String> =
             rhs
             .iter()
@@ -49,7 +48,7 @@ impl GrammarRule {
 }
 
 impl<'a> LLGrammar<'a> {
-    fn new(grammar: &'a [GrammarRule]) -> Result<Self, errors::RecallError> {
+    pub fn new(grammar: &'a [GrammarRule]) -> Result<Self, errors::RecallError> {
         let non_terminals: HashSet<&str> =
             grammar
             .iter()
@@ -298,20 +297,24 @@ impl<'a> LLGrammar<'a> {
     }
 }
 
-trait SyntaxToken {
+pub trait SyntaxToken {
     fn label(&self) -> String;
     fn from_sym(sym: &str) -> Self;
 }
 
-trait SyntaxTree<E>
-    where Self: Sized,
-          E: SyntaxToken + Clone + fmt::Display,
+pub trait TokenInputStream<Token: SyntaxToken> {
+    fn peek_token(&mut self) -> Result<Option<&Token>, errors::RecallError>;
+    fn next_token(&mut self) -> Result<Option<Token>, errors::RecallError>;
+}
+
+pub trait SyntaxTree<Token>
+where
+    Self: Sized,
+    Token: SyntaxToken,
 {
     fn new() -> Self;
 
-    fn elem_as_string(&self) -> String;
-
-    fn update(&mut self, elem: E);
+    fn update(&mut self, elem: Token);
 
     fn add_child(&mut self, child: Self);
 
@@ -319,32 +322,35 @@ trait SyntaxTree<E>
 
     fn children(&self) -> slice::Iter<Self>;
 
-    fn parse<'a>(
-        mut input: Peekable<impl Iterator<Item = E>>,
+    fn parse<'a, InputStream>(
+        mut input: InputStream,
         table: &LLGrammarTable<'a>,
         terminals: &HashSet<&'a str>,
         start_sym: &str,
-    ) -> Result<Self, errors::RecallError> {
+    ) -> Result<Self, errors::RecallError>
+    where
+        InputStream: TokenInputStream<Token>,
+    {
         let mut stack = vec![];
         let mut start = Self::new();
-        start.update(E::from_sym(start_sym));
+        start.update(Token::from_sym(start_sym));
         stack.push((start_sym, &mut start));
 
         while let Some((sym, pn)) = stack.pop() {
-            if let Some(token) = input.peek() {
+            if let Some(token) = input.peek_token()? {
                 if terminals.contains(sym) {
                     if token.label() != sym {
                         return Err(errors::RecallError::ParserError(format!("wanted {:?} but got {:?} from input", sym, token.label())));
                     }
 
-                    pn.update(token.clone());
+                    let token = input.next_token()?; // consume input
+                    pn.update(token.unwrap());
 
-                    input.next().unwrap(); // consume input
                 } else {
                     if let Some(rules) = table.get(&(sym, &token.label())) {
                         let rule = rules[0];
 
-                        pn.update(E::from_sym(sym));
+                        pn.update(Token::from_sym(sym));
 
                         rule
                         .rhs
@@ -368,28 +374,10 @@ trait SyntaxTree<E>
             }
         }
 
-        if input.peek().is_none() {
+        if input.peek_token()?.is_none() {
             Ok(start)
         } else {
-            let rem =
-                input
-                .map(|e| e.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(errors::RecallError::ParserError(format!("input parsed completely with remaining input tokens: {:?}", rem)))
-        }
-    }
-
-    fn print_tree(&self, indent: usize, print_arrow: bool) {
-        // Prepare the prefix: indent and arrow if needed.
-        let indent_str = " ".repeat(indent);
-        let arrow = if print_arrow { "-> " } else { "" };
-
-        // Print the current node.
-        println!("{}{}{}", indent_str, arrow, self.elem_as_string());
-        // Recursively print each child with increased indentation.
-        for child in self.children() {
-            child.print_tree(indent + 2, true);
+            Err(errors::RecallError::ParserError(format!("input parsed completely with remaining input tokens")))
         }
     }
 }
@@ -397,199 +385,7 @@ trait SyntaxTree<E>
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    mod datalog_grammar {
-        use super::*;
-
-        fn datalog_grammar() -> Vec<GrammarRule> {
-            vec![
-                // Program -> Stmts $
-                GrammarRule::new("Program", &["Stmts", "$"]),
-                // Stmts -> Stmt Stmts
-                // Stmts ->
-                GrammarRule::new("Stmts", &["Stmt", "Stmts"]),
-                GrammarRule::new("Stmts", &[]),
-                // Stmt -> Literal Stmt'
-                GrammarRule::new("Stmt", &["Literal", "Stmt'"]),
-                // Stmt' -> ?
-                // Stmt' -> .
-                // Stmt' -> !
-                // Stmt' -> :- Body EndBody
-                GrammarRule::new("Stmt'", &["?"]),
-                GrammarRule::new("Stmt'", &["."]),
-                GrammarRule::new("Stmt'", &["!"]),
-                GrammarRule::new("Stmt'", &[":-", "Body", "EndBody"]),
-                // EndBody -> .
-                // EndBody -> !
-                GrammarRule::new("EndBody", &["."]),
-                GrammarRule::new("EndBody", &["!"]),
-                // Body -> Literal Body'
-                GrammarRule::new("Body", &["Literal", "Body'"]),
-                // Body' -> , Literal Body'
-                // Body' ->
-                GrammarRule::new("Body'", &[",", "Literal", "Body'"]),
-                GrammarRule::new("Body'", &[]),
-                // Literal -> PredSym Literal'
-                GrammarRule::new("Literal", &["PredSym", "Literal'"]),
-                // Literal' -> ( Terms )
-                // Literal' ->
-                GrammarRule::new("Literal'", &["(", "Terms", ")"]),
-                GrammarRule::new("Literal'", &[]),
-                // PredSym -> atom
-                // PredSym -> string
-                GrammarRule::new("PredSym", &["atom"]),
-                GrammarRule::new("PredSym", &["string"]),
-                // Terms -> Term Terms'
-                // Terms ->
-                GrammarRule::new("Terms", &["Term", "Terms'"]),
-                GrammarRule::new("Terms", &[]),
-                // Terms' -> , Term Terms'
-                // Terms' ->
-                GrammarRule::new("Terms'", &[",", "Term", "Terms'"]),
-                GrammarRule::new("Terms'", &[]),
-                // Term -> atom
-                // Term -> string
-                // Term -> var
-                // Term -> number
-                GrammarRule::new("Term", &["atom"]),
-                GrammarRule::new("Term", &["string"]),
-                GrammarRule::new("Term", &["var"]),
-                GrammarRule::new("Term", &["number"]),
-            ]
-        }
-
-        #[derive(Debug, Clone)]
-        pub enum DatalogToken {
-            Assertion,
-            Retraction,
-            Query,
-            If,
-            Comma,
-            LeftParen,
-            RightParen,
-            End,
-            Atom(String),
-            String(String),
-            Var(String),
-            Number(i32),
-            Expr(String),
-        }
-
-        impl fmt::Display for DatalogToken {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}", match self {
-                    Self::Assertion => ".".to_string(),
-                    Self::Retraction => "!".to_string(),
-                    Self::Query => "?".to_string(),
-                    Self::If => ":-".to_string(),
-                    Self::Comma => ",".to_string(),
-                    Self::LeftParen => "(".to_string(),
-                    Self::RightParen => ")".to_string(),
-                    Self::Atom(_) => "atom".to_string(),
-                    Self::String(_) => "string".to_string(),
-                    Self::Var(_) => "var".to_string(),
-                    Self::Number(_) => "number".to_string(),
-                    Self::Expr(sym) => sym.to_string(),
-                    Self::End => "$".to_string(),
-                })?;
-                Ok(())
-            }
-        }
-
-        impl SyntaxToken for DatalogToken {
-            fn label(&self) -> String {
-                match self {
-                    Self::Assertion => ".".to_string(),
-                    Self::Retraction => "!".to_string(),
-                    Self::Query => "?".to_string(),
-                    Self::If => ":-".to_string(),
-                    Self::Comma => ",".to_string(),
-                    Self::LeftParen => "(".to_string(),
-                    Self::RightParen => ")".to_string(),
-                    Self::Atom(_) => "atom".to_string(),
-                    Self::String(_) => "string".to_string(),
-                    Self::Var(_) => "var".to_string(),
-                    Self::Number(_) => "number".to_string(),
-                    Self::Expr(sym) => sym.to_string(),
-                    Self::End => "$".to_string(),
-                }
-            }
-
-            fn from_sym(sym: &str) -> Self {
-                Self::Expr(sym.to_string())
-            }
-        }
-
-        struct DatalogSyntaxTree<E: SyntaxToken> {
-            elem: Option<E>,
-            children: Vec<DatalogSyntaxTree<E>>,
-        }
-
-        impl<E: SyntaxToken + fmt::Debug + Clone + fmt::Display> SyntaxTree<E> for DatalogSyntaxTree<E> {
-            fn new() -> Self {
-                DatalogSyntaxTree { elem: None, children: vec![] }
-            }
-
-            fn elem_as_string(&self) -> String {
-                self.elem.as_ref().unwrap().to_string()
-            }
-
-            fn update(&mut self, elem: E) {
-                self.elem = Some(elem);
-            }
-
-            fn add_child(&mut self, child: Self) {
-                self.children.push(child);
-            }
-
-            fn children_mut(&mut self) -> slice::IterMut<Self> {
-                self.children.iter_mut()
-            }
-
-            fn children(&self) -> slice::Iter<Self> {
-                self.children.iter()
-            }
-        }
-
-        #[test]
-        fn it_can_parse_datalog_grammar() {
-            let input = vec![
-                DatalogToken::Atom("foo".to_string()),
-                DatalogToken::LeftParen,
-                DatalogToken::Var("A".to_string()),
-                DatalogToken::Comma,
-                DatalogToken::Var("B".to_string()),
-                DatalogToken::RightParen,
-                DatalogToken::If,
-                //
-                DatalogToken::Atom("bar".to_string()),
-                DatalogToken::LeftParen,
-                DatalogToken::Var("A".to_string()),
-                DatalogToken::Comma,
-                DatalogToken::Var("B".to_string()),
-                DatalogToken::RightParen,
-                //
-                DatalogToken::Assertion,
-                //
-                DatalogToken::Atom("foo".to_string()),
-                DatalogToken::LeftParen,
-                DatalogToken::RightParen,
-                DatalogToken::Retraction,
-                DatalogToken::End,
-            ];
-            let grammar = datalog_grammar();
-            let result = LLGrammar::new(&grammar);
-            assert!(result.is_ok());
-            let ll = result.unwrap();
-            let pn = DatalogSyntaxTree::parse(
-                input.into_iter().peekable(),
-                &ll.table,
-                &ll.terminals,
-                "Program",
-            );
-            assert!(pn.is_ok());
-        }
-    }
+    use std::iter::Peekable;
 
     mod simple_grammar {
         use super::*;
@@ -628,7 +424,6 @@ mod tests {
         }
 
         // Simple grammars
-        #[derive(Debug, Clone)]
         pub enum SimpleToken {
             LeftParen,
             RightParen,
@@ -637,21 +432,6 @@ mod tests {
             Num(i32),
             Expr(String),
             End,
-        }
-
-        impl fmt::Display for SimpleToken {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}", match self {
-                    Self::LeftParen => "(".to_string(),
-                    Self::RightParen => ")".to_string(),
-                    Self::Op(label) => label.clone(),
-                    Self::Ident(_) => "id".to_string(),
-                    Self::Num(_) => "num".to_string(),
-                    Self::Expr(sym) => sym.to_string(),
-                    Self::End => "$".to_string(),
-                })?;
-                Ok(())
-            }
         }
 
         impl SyntaxToken for SimpleToken {
@@ -672,21 +452,17 @@ mod tests {
             }
         }
 
-        struct SimpleSyntaxTree<E: SyntaxToken> {
-            elem: Option<E>,
-            children: Vec<SimpleSyntaxTree<E>>,
+        struct SimpleSyntaxTree<Token: SyntaxToken> {
+            elem: Option<Token>,
+            children: Vec<SimpleSyntaxTree<Token>>,
         }
 
-        impl<E: SyntaxToken + fmt::Debug + Clone + fmt::Display> SyntaxTree<E> for SimpleSyntaxTree<E> {
+        impl<Token: SyntaxToken> SyntaxTree<Token> for SimpleSyntaxTree<Token> {
             fn new() -> Self {
                 SimpleSyntaxTree { elem: None, children: vec![] }
             }
 
-            fn elem_as_string(&self) -> String {
-                self.elem.as_ref().unwrap().to_string()
-            }
-
-            fn update(&mut self, elem: E) {
+            fn update(&mut self, elem: Token) {
                 self.elem = Some(elem);
             }
 
@@ -703,18 +479,41 @@ mod tests {
             }
         }
 
+        struct SimpleInputStream<Token, Iter>
+        where
+            Token: SyntaxToken,
+            Iter: Iterator<Item = Token>,
+        {
+            tokens: Peekable<Iter>,
+        }
+
+        impl<Token, Iter> TokenInputStream<Token> for SimpleInputStream<Token, Iter>
+        where
+            Token: SyntaxToken,
+            Iter: Iterator<Item = Token>,
+        {
+            fn peek_token(&mut self) -> Result<Option<&Token>, errors::RecallError> {
+                Ok(self.tokens.peek())
+            }
+
+            fn next_token(&mut self) -> Result<Option<Token>, errors::RecallError> {
+                Ok(self.tokens.next())
+            }
+        }
+
         #[test]
         fn it_can_parse_input_0() {
-            let input = vec![
+            let tokens = vec![
                 SimpleToken::Ident("foo".to_string()),
                 SimpleToken::End,
-            ];
+            ].into_iter().peekable();
+            let input_stream = SimpleInputStream { tokens };
             let grammar = simple_arithmetic_grammar();
             let result = LLGrammar::new(&grammar);
             assert!(result.is_ok());
             let ll = result.unwrap();
             let pn = SimpleSyntaxTree::parse(
-                input.into_iter().peekable(),
+                input_stream,
                 &ll.table,
                 &ll.terminals,
                 "S",
@@ -724,18 +523,19 @@ mod tests {
 
         #[test]
         fn it_can_parse_input_1() {
-            let input = vec![
+            let tokens = vec![
                 SimpleToken::Num(42),
                 SimpleToken::Op("+".to_string()),
                 SimpleToken::Num(100),
                 SimpleToken::End,
-            ];
+            ].into_iter().peekable();
+            let input_stream = SimpleInputStream { tokens };
             let grammar = simple_arithmetic_grammar();
             let result = LLGrammar::new(&grammar);
             assert!(result.is_ok());
             let ll = result.unwrap();
             let pn = SimpleSyntaxTree::parse(
-                input.into_iter().peekable(),
+                input_stream,
                 &ll.table,
                 &ll.terminals,
                 "S",
@@ -745,7 +545,7 @@ mod tests {
 
         #[test]
         fn it_can_parse_input_2() {
-            let input = vec![
+            let tokens = vec![
                 SimpleToken::LeftParen,
                 SimpleToken::Num(42),
                 SimpleToken::Op("-".to_string()),
@@ -754,13 +554,14 @@ mod tests {
                 SimpleToken::Op("/".to_string()),
                 SimpleToken::Ident("n".to_string()),
                 SimpleToken::End,
-            ];
+            ].into_iter().peekable();
+            let input_stream = SimpleInputStream { tokens };
             let grammar = simple_arithmetic_grammar();
             let result = LLGrammar::new(&grammar);
             assert!(result.is_ok());
             let ll = result.unwrap();
             let pn = SimpleSyntaxTree::parse(
-                input.into_iter().peekable(),
+                input_stream,
                 &ll.table,
                 &ll.terminals,
                 "S",

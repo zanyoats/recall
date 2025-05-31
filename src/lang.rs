@@ -1,8 +1,4 @@
 mod scan;
-mod program;
+pub mod program;
 mod parsers;
-
-pub use program::Program;
-pub use program::Rule;
-pub use program::Term;
-pub use program::Bindings;
+pub mod unify;
