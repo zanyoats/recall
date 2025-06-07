@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::lang::program::Term;
+use crate::lang::parse::Term;
 
 pub type Bindings<'a> = HashMap<&'a str, &'a Term>;
 
@@ -55,7 +55,7 @@ fn unify_terms<'a>(t0: &'a Term, t1: &'a Term, bindings: &mut Bindings<'a>) -> b
     match (t0, t1) {
         (Atom(x), Atom(y)) =>
             x == y,
-        (String(x), String(y)) =>
+        (Str(x), Str(y)) =>
             x == y,
         (Integer(x), Integer(y)) =>
             x == y,

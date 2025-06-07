@@ -1,4 +1,3 @@
-mod scan;
-pub mod program;
-mod parsers;
+pub mod scan;
+pub mod parse;
 pub mod unify;

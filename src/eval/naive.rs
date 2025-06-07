@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
-use crate::lang::program::Literal;
-use crate::lang::program::Predicate;
+use crate::lang::parse::Literal;
+use crate::lang::parse::Predicate;
 use crate::lang::unify::Bindings;
 use crate::lang::unify::unify;
 use crate::lang::unify::unify_with_bindings;
@@ -133,8 +133,10 @@ fn eval_predicate<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lang::program::DatalogAST;
-    use crate::lang::program::Statement;
+    use crate::lang::scan::Scanner;
+    use crate::lang::parse::parse_program;
+    use crate::lang::parse::Parser;
+    use crate::lang::parse::Statement;
 
     #[test]
     fn it_evals_datalog() {
@@ -147,12 +149,14 @@ mod tests {
             link(X, Y)?
             same(X)?
         ";
-        let ast = DatalogAST::from_string(program);
-        let ast = ast.unwrap();
+        let scanner = Scanner::new(program);
+        let mut parser = Parser::new(scanner);
+        let program = parse_program(&mut parser);
+        let program = program.unwrap();
         let mut facts = vec![];
         let mut rules = vec![];
         let mut queries = vec![];
-        for stmt in ast.program.iter() {
+        for stmt in program.statements.iter() {
             if let Statement::Query(stmt) = stmt {
                 queries.push(stmt);
             }

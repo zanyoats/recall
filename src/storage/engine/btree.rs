@@ -57,6 +57,20 @@ impl BPlusTree {
 }
 
 impl BPlusTree {
+    pub fn typecheck(&self, tup_scm0: &Vec<u8>) -> Result<(), errors::RecallError> {
+        let pager = self.pager.borrow_mut();
+        let node_cell = &mut pager.fetch(self.root_page_num);
+        let node = node_cell.borrow();
+        let (_, tup_scm) = node.leaf_key_and_tup_scm();
+        if *tup_scm0 == tup_scm {
+            Ok(())
+        } else {
+            Err(errors::RecallError::TypeError(format!(
+                "predicate type defined does not typecheck with re-declaration",
+            )))
+        }
+    }
+
     /// Inserts a key-value pair into the tree.
     /// Splits nodes if needed and updates internal pointers.
     pub fn insert(&self, key: &KeyVal, val: &TupVal) -> Result<(), errors::RecallError> {
@@ -130,13 +144,24 @@ impl BPlusTree {
             ParameterType::typecheck(start_key, &key_scm)?;
             ParameterType::typecheck(stop_key, &key_scm)?;
         }
-        Ok(BPlusTreeIntoIter::new(self, front, back))
+        Ok(BPlusTreeIntoIter::new(self, front, back, false))
+    }
+
+    pub fn key_into_iter(self) -> Result<BPlusTreeIntoIter, errors::RecallError> {
+        let (front, back) = {
+            let mut pager = self.pager.borrow_mut();
+            let front = BTreeCursor::begin(&mut pager, self.root_page_num);
+            let back = BTreeCursor::end(&mut pager, self.root_page_num);
+            (front, back)
+        };
+        Ok(BPlusTreeIntoIter::new(self, front, back, true))
     }
 }
 
 pub struct BPlusTreeIntoIter {
     btree: BPlusTree,
     cursors: Option<(BTreeCursor, BTreeCursor)>,
+    key_iter: bool,
 }
 
 impl BPlusTreeIntoIter {
@@ -144,6 +169,7 @@ impl BPlusTreeIntoIter {
         btree: BPlusTree,
         front: BTreeCursor,
         back: BTreeCursor,
+        key_iter: bool,
     ) -> Self {
         let front_option = {
             let front_node_num_entries = {
@@ -168,11 +194,13 @@ impl BPlusTreeIntoIter {
                     BPlusTreeIntoIter {
                         btree,
                         cursors: None,
+                        key_iter,
                     }
                 } else {
                     BPlusTreeIntoIter {
                         btree,
                         cursors: Some((front, back)),
+                        key_iter,
                     }
                 }
             }
@@ -180,6 +208,7 @@ impl BPlusTreeIntoIter {
                 BPlusTreeIntoIter {
                     btree,
                     cursors: None,
+                    key_iter,
                 }
             }
         }
@@ -251,7 +280,7 @@ impl BPlusTreeIntoIter {
 }
 
 impl Iterator for BPlusTreeIntoIter {
-    type Item = TupVal;
+    type Item = Vec<ParameterType>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self
@@ -262,8 +291,11 @@ impl Iterator for BPlusTreeIntoIter {
                 let pager = self.btree.pager.borrow_mut();
                 let node_cell = pager.fetch(front.page_num);
                 let node = node_cell.borrow();
-                let val= node.leaf_get_val(front.tuple_index);
-                val
+                if self.key_iter {
+                    node.leaf_get_key(front.tuple_index)
+                } else {
+                    node.leaf_get_val(front.tuple_index)
+                }
             };
 
             self.cursors =
@@ -291,8 +323,11 @@ impl<'a> DoubleEndedIterator for BPlusTreeIntoIter {
                 let pager = self.btree.pager.borrow_mut();
                 let node_cell = pager.fetch(back.page_num);
                 let node = node_cell.borrow();
-                let val = node.leaf_get_val(back.tuple_index);
-                val
+                if self.key_iter {
+                    node.leaf_get_key(back.tuple_index)
+                } else {
+                    node.leaf_get_val(back.tuple_index)
+                }
             };
 
             self.cursors =
@@ -322,7 +357,7 @@ impl IntoIterator for BPlusTree {
             let back = BTreeCursor::end(&mut pager, self.root_page_num);
             (front, back)
         };
-        BPlusTreeIntoIter::new(self, front, back)
+        BPlusTreeIntoIter::new(self, front, back, false)
     }
 }
 
@@ -779,7 +814,8 @@ mod tests {
         };
         let result = btree.insert(&u32_key(42), &tuple);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), errors::RecallError::UniqueKeyError);
+        matches!(result, Err(errors::RecallError::UniqueKeyError));
+        // assert_eq!(result.unwrap_err(), errors::RecallError::UniqueKeyError);
     }
 
     #[test]

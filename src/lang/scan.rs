@@ -1,10 +1,18 @@
+use std::iter;
 use std::iter::Peekable;
 use std::str::Chars;
+use std::fmt;
 
 use crate::errors;
 
 #[derive(Debug)]
-pub enum DatalogToken {
+pub enum Token {
+    /* data types */
+    Atom(String),
+    Str(String),
+    Var(String),
+    Integer(i32),
+    /* punctuation */
     Assertion,
     Retraction,
     Query,
@@ -12,423 +20,217 @@ pub enum DatalogToken {
     Comma,
     Plus,
     Minus,
-    LeftParen,
-    RightParen,
+    LP,
+    RP,
+    Decl,
+    /* end of file */
     End,
-    Atom(String),
-    String(String),
-    Var(String),
-    Integer(i32),
-    Float(f32),
-    Expr(String), // used only by parsing, not a native datalog token
 }
 
-impl DatalogToken {
-    fn from_integer_string(s: String) -> Result<Self, errors::RecallError> {
-        s
-        .parse::<i32>()
-        .map(|n| Self::Integer(n))
-        .map_err(|err| errors::RecallError::ScanError(err.to_string()))
-    }
+impl PartialEq for Token {
+    fn eq(&self, other: &Self) -> bool {
+        use Token::*;
 
-    fn from_float_string(s: String) -> Result<Self, errors::RecallError> {
-        s
-        .parse::<f32>()
-        .map(|n| Self::Float(n))
-        .map_err(|err| errors::RecallError::ScanError(err.to_string()))
+        match (self, other) {
+            // variants with payloads
+            (Atom(_), Atom(_))
+            | (Str(_), Str(_))
+            | (Var(_), Var(_))
+            | (Integer(_), Integer(_)) => true,
+            // zero payload variants
+            (Decl, Decl)
+            | (Assertion, Assertion)
+            | (Retraction, Retraction)
+            | (Query, Query)
+            | (If, If)
+            | (Comma, Comma)
+            | (Plus, Plus)
+            | (Minus, Minus)
+            | (LP, LP)
+            | (RP, RP)
+            | (End, End) => true,
+            // every other case
+            _ => false,
+
+        }
+    }
+}
+
+impl Eq for Token {}
+
+impl fmt::Display for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use Token::*;
+
+        match self {
+            /* data types */
+            Atom(_)     => write!(f, "atom"),
+            Str(_)      => write!(f, "str"),
+            Var(_)      => write!(f, "var"),
+            Integer(_)  => write!(f, "integer"),
+            /* punctuation */
+            Decl        => write!(f, "%!"),
+            Assertion   => write!(f, "."),
+            Retraction  => write!(f, "!"),
+            Query       => write!(f, "?"),
+            If          => write!(f, ":-"),
+            Comma       => write!(f, ","),
+            Plus        => write!(f, "+"),
+            Minus       => write!(f, "-"),
+            LP          => write!(f, "("),
+            RP          => write!(f, ")"),
+            /* end of file */
+            End         => write!(f, "<EOF>"),
+        }
     }
 }
 
 pub struct Scanner<'a> {
-    stream: Peekable<Chars<'a>>,
+    iterable: Peekable<Chars<'a>>,
+    buf: Option<Token>,
 }
 
 impl<'a> Scanner<'a> {
-    pub fn new(contents: &'a str) -> Self {
-        Self {
-            stream: contents.chars().peekable(),
-        }
+    pub fn new(input: &'a str) -> Self {
+        Scanner { iterable: input.chars().peekable(), buf: None }
     }
 
-    pub fn next_token(&mut self) -> Result<DatalogToken, errors::RecallError> {
-        use DatalogToken::End;
-
-        self
-        .stream
-        .next()
-        .map_or(Ok(End), |c| self.next_token_char(c))
-    }
-
-    fn next_token_char(&mut self, mut c: char) -> Result<DatalogToken, errors::RecallError> {
-        use DatalogToken as Tok;
-
-        while c.is_whitespace() {
-            match self.stream.next() {
-                Some(c0) => c = c0,
-                None => return Ok(Tok::End),
-            }
+    pub fn peek_token(&mut self) -> Result<&Token, errors::RecallError> {
+        if self.buf.is_none() {
+            self.buf = Some(self.advance()?);
         }
 
-        if c == '.' { /* either an assertion or start of a decimal number */
-            match self.stream.peek() {
-                Some(c0) if c0.is_digit(10) => {
-                    let mut result = c.to_string();
-                    self.scan_digits(&mut result)?;
-                    self.scan_num_suffix(&mut result)?;
-                    DatalogToken::from_float_string(result)
-                },
-                _ => Ok(Tok::Assertion),
-            }
-        } else if c == '!' {
-            Ok(Tok::Retraction)
-        } else if c == '?' {
-            Ok(Tok::Query)
-        } else if c == ',' {
-            Ok(Tok::Comma)
-        } else if c == '(' {
-            Ok(Tok::LeftParen)
-        } else if c == ')' {
-            Ok(Tok::RightParen)
-        } else if c == '+' {
-            Ok(Tok::Plus)
-        } else if c == '-' {
-            Ok(Tok::Minus)
-        } else if c == ':' {
-            match self.stream.peek() {
-                Some(&'-') => {
-                    self.stream.next();
-                    Ok(Tok::If)
-                }
-                Some(c) => Err(errors::RecallError::ScanError(format!(
-                    "found unexpected char {:?} when parsing",
-                    c,
-                ))),
-                None => Err(errors::RecallError::ScanError(format!(
-                    "unexpected end of input"
-                ))),
-            }
-        } else if c.is_uppercase() && c.is_ascii_alphabetic() || c == '_' { /* start of var */
-            let mut result = c.to_string();
+        Ok(self.buf.as_ref().unwrap())
+    }
 
-            while let Some(c) = self.stream.peek() {
-                if c.is_ascii_alphanumeric() || *c == '_' {
-                    result.push(*c);
-                    self.stream.next();
-                } else {
-                    break;
-                }
-            }
-
-            Ok(Tok::Var(result))
-        } else if c.is_lowercase() && c.is_ascii_alphabetic() { /* start of atom */
-            let mut result = c.to_string();
-
-            while let Some(c) = self.stream.peek() {
-                if c.is_ascii_alphanumeric() || *c == '_' {
-                    result.push(*c);
-                    self.stream.next();
-                } else {
-                    break;
-                }
-            }
-
-            Ok(Tok::Atom(result))
-        } else if c.is_digit(10) { /* start of number */
-            let mut result = c.to_string();
-
-            if let Some(c) = self.stream.peek() {
-                if c.is_digit(10) {
-                    self.scan_digits(&mut result)?;
-                }
-            }
-
-            match self.stream.peek() {
-                Some(&'.') => {
-                    result.push(self.stream.next().unwrap());
-
-                    if let Some(c) = self.stream.peek() {
-                        if c.is_digit(10) {
-                            self.scan_digits(&mut result)?;
-                        }
-                    }
-
-                    self.scan_num_suffix(&mut result)?;
-                    DatalogToken::from_float_string(result)
-                }
-                Some(&'e') | Some(&'E') => {
-                    self.scan_num_suffix(&mut result)?;
-                    DatalogToken::from_float_string(result)
-                }
-                _ => DatalogToken::from_integer_string(result),
-            }
-        } else if c == '"' { /* start of string */
-            self.scan_string(String::new())
+    pub fn next_token(&mut self) -> Result<Token, errors::RecallError> {
+        if let Some(token) = self.buf.take() {
+            Ok(token)
         } else {
-            Err(errors::RecallError::ScanError(format!(
-                "found unexpected char {:?} when parsing",
-                c,
-            )))
+            Ok(self.advance()?)
         }
     }
 
-    fn scan_string(&mut self, mut buf: String) -> Result<DatalogToken, errors::RecallError> {
-        loop {
-            match self.stream.peek() {
-                Some(&'"') => {
-                    self.stream.next();
-                    break Ok(DatalogToken::String(buf))
-                }
-                Some(&'\\') => {
-                    self.stream.next();
-                    match self.stream.peek() {
-                        Some('"') => {
-                            self.stream.next();
-                            buf.push('"');
-                            continue
-                        }
-                        Some('\\') => {
-                            self.stream.next();
-                            buf.push('\\');
-                            continue
-                        }
-                        Some('t') => {
-                            self.stream.next();
-                            buf.push('\t');
-                            continue
-                        }
-                        Some('n') => {
-                            self.stream.next();
-                            buf.push('\n');
-                            continue
-                        }
-                        Some('r') => {
-                            self.stream.next();
-                            buf.push('\r');
-                            continue
-                        }
-                        Some('0') => {
-                            self.stream.next();
-                            buf.push('\0');
-                            continue
-                        }
-                        Some(c) =>
-                            break Err(errors::RecallError::ScanError(format!(
-                                "invalid escape '\\{}'",
-                                c,
-                            ))),
-                        None =>
-                            break Err(errors::RecallError::ScanError(format!(
-                                "unexpected end of input before end of string"
-                            ))),
+    fn advance(&mut self) -> Result<Token, errors::RecallError> {
+        use Token::*;
+        use errors::RecallError::{ScanError, ScanErrorUnderlying};
+
+        while let Some(ch) = self.iterable.next() {
+            match ch {
+                ch if ch.is_whitespace() => continue,
+                /* punctuation */
+                '.' => return Ok(Assertion),
+                '!' => return Ok(Retraction),
+                '?' => return Ok(Query),
+                ',' => return Ok(Comma),
+                '+' => return Ok(Plus),
+                '-' => return Ok(Minus),
+                '(' => return Ok(LP),
+                ')' => return Ok(RP),
+                ':' => {
+                    if let Some('-') = self.iterable.peek() {
+                        self.iterable.next();
+                        return Ok(If)
+                    } else {
+                        return Err(ScanError(format!(
+                            "unrecognized charater '{}' following colon '{}'", ch, ":",
+                        )))
+                    }
+                },
+                '%' => {
+                    if let Some('!') = self.iterable.peek() {
+                        self.iterable.next();
+                        return Ok(Decl)
+                    } else {
+                        self.iterable.next();
+                        let _ = iter::from_fn(|| self.iterable.next_if(|s| *s != '\n')).collect::<String>();
+                        continue;
                     }
                 }
-                Some(_) => {
-                    buf.push(self.stream.next().unwrap());
-                    continue
+                /* start of variables */
+                'A'..='Z' | '_' => {
+                    let s = iter::once(ch)
+                        .chain(iter::from_fn(|| self.iterable.next_if(|s| s.is_ascii_alphanumeric() || *s == '_')))
+                        .collect::<String>();
+                    return Ok(Var(s))
                 }
-                None =>
-                    break Err(errors::RecallError::ScanError(format!(
-                        "unexpected end of input"
-                    ))),
-            }
-        }
-    }
+                /* start of atoms */
+                'a'..='z' => {
+                    let s = iter::once(ch)
+                        .chain(iter::from_fn(|| self.iterable.next_if(|s| s.is_ascii_alphanumeric() || *s == '_')))
+                        .collect::<String>();
+                    return Ok(Atom(s))
+                }
+                /* start if number */
+                '0'..='9' => {
+                    let n = iter::once(ch)
+                        .chain(iter::from_fn(|| self.iterable.next_if(|s| s.is_ascii_digit())))
+                        .collect::<String>()
+                        .parse::<i32>()
+                        .map_err(|underlying| {
+                            ScanErrorUnderlying(Box::new(underlying))
+                        })?;
+                    return Ok(Integer(n))
+                }
+                /* start of string */
+                '"' => {
+                    let s = iter::from_fn(|| {
+                        match self.iterable.peek() {
+                            Some('"') => None,
+                            Some('\\') => {
+                                self.iterable.next();
+                                match self.iterable.next() {
+                                    Some('t') => Some('\t'),
+                                    Some('n') => Some('\n'),
+                                    Some('r') => Some('\r'),
+                                    Some('0') => Some('\0'),
+                                    Some(c) => Some(c),
+                                    None => None,
+                                }
+                            },
+                            Some(_) => self.iterable.next(),
+                            None => None,
+                        }
+                    })
+                    .collect::<String>();
 
-    fn scan_num_suffix(&mut self, buf: &mut String) -> Result<(), errors::RecallError> {
-        match self.stream.peek() {
-            Some(&'e') | Some(&'E') => {
-                buf.push(self.stream.next().unwrap());
-
-                if let Some(c) = self.stream.peek() {
-                    if *c == '-' || *c == '+' {
-                        buf.push(self.stream.next().unwrap());
+                    if let Some('"') = self.iterable.next() {
+                        return Ok(Str(s))
+                    } else {
+                        return Err(ScanError(format!(
+                            "no closing quote found when parsing string",
+                        )))
                     }
                 }
-
-                self.scan_digits(buf)?;
-                Ok(())
-            }
-            _ => Ok(()),
-        }
-    }
-
-    fn scan_digits(&mut self, buf: &mut String) -> Result<(), errors::RecallError> {
-        self.scan_digit(buf)?;
-        loop {
-            match self.stream.peek() {
-                Some(c) if c.is_digit(10) => {
-                    self.scan_digit(buf)?;
-                    continue
-                }
-                Some(&'_') => {
-                    self.stream.next();
-                    self.scan_digit(buf)?;
-                    continue
-                }
-                _ => break Ok(()),
+                /* unregonized case */
+                _ => return Err(ScanError(format!(
+                    "unrecognized character '{}'", ch,
+                )))
             }
         }
-    }
-
-    fn scan_digit(&mut self, buf: &mut String) -> Result<(), errors::RecallError> {
-        match self.stream.peek() {
-            Some(c) if c.is_digit(10) => {
-                buf.push(self.stream.next().unwrap());
-                Ok(())
-            },
-            Some(c) =>
-                Err(errors::RecallError::ScanError(format!(
-                    "found unexpected character {:?} when parsing number",
-                    c,
-                ))),
-            None =>
-                Err(errors::RecallError::ScanError(format!(
-                    "unexpected end of input"
-                ))),
-        }
+        return Ok(End)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use DatalogToken as Tok;
+    use Token::*;
 
     #[test]
     fn it_scans_valid_tokens() {
-        let mut scanner = Scanner::new("foo(a, -42, 69.69).");
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Atom(_)));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::LeftParen));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Atom(_)));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Comma));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Minus));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Integer(_)));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Comma));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Float(_)));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::RightParen));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Assertion));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::End));
-
-        let mut scanner = Scanner::new("foo(Bar123)?");
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Atom(_)));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::LeftParen));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Var(_)));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::RightParen));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Query));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::End));
-
-        let mut scanner = Scanner::new("foo(X) :- true, bar(X, _)!");
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Atom(_)));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::LeftParen));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Var(_)));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::RightParen));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::If));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Atom(_)));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Comma));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Atom(_)));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::LeftParen));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Var(_)));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Comma));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Var(_)));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::RightParen));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Retraction));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::End));
-    }
-
-    #[test]
-    fn it_matches_atom_payload() {
-        let mut scanner = Scanner::new("foo");
-        match scanner.next_token().unwrap() {
-            Tok::Atom(s) => assert_eq!(s, "foo"),
-            _ => panic!("did not match"),
-        }
-    }
-
-    #[test]
-    fn it_matches_var_payload() {
-        let mut scanner = Scanner::new("Bar");
-        match scanner.next_token().unwrap() {
-            Tok::Var(s) => assert_eq!(s, "Bar"),
-            _ => panic!("did not match"),
-        }
-    }
-
-    #[test]
-    fn it_matches_string_payload() {
-        for (input, want) in [
-            ("\"Hello, world!\"", "Hello, world!"),
-            ("\"The \\\"Great\\\" Whale\"", "The \"Great\" Whale"),
-            ("\"line1\n\"", "line1\n" ),
-        ] {
-            let mut scanner = Scanner::new(input);
-            match scanner.next_token().unwrap() {
-                Tok::String(got) => assert_eq!(got, want),
-                _ => panic!("did not match"),
-            }
-        }
-    }
-
-    #[test]
-    fn it_matches_float_payload() {
-        for (input, want) in [
-            ("1.", "1"),
-            ("0.1", "0.1"),
-            ("1.1", "1.1"),
-            (".1", "0.1"),
-            (".1", "0.1"),
-            ("0.1", "0.1"),
-            (".1e1", "1"),
-            ("1e1", "10"),
-            ("1.1e1", "11"),
-            ("42e1", "420"),
-            (".1e-1", "0.01"),
-            ("1e-1", "0.1"),
-            ("1.1e-1", "0.11"),
-            ("42e-1", "4.2"),
-            ("42e-1", "4.2"),
-            ("42.", "42"),
-        ] {
-            let mut scanner = Scanner::new(input);
-            match scanner.next_token().unwrap() {
-                Tok::Float(got) => assert_eq!(got.to_string(), want),
-                // Tok::Float(got) => println!("{:?}", got.to_string()),
-                _ => panic!("did not match"),
-            }
-        }
-    }
-
-    #[test]
-    fn it_matches_integer_payload() {
-        let mut scanner = Scanner::new("42");
-        match scanner.next_token().unwrap() {
-            Tok::Integer(s) => assert_eq!(s, 42),
-            _ => panic!("did not match"),
-        }
-    }
-
-    #[test]
-    fn it_reports_errors_on_invalid_input() {
-        let mut scanner = Scanner::new("*");
-        assert!(scanner.next_token().is_err());
-
-        let mut scanner = Scanner::new(":");
-        assert!(scanner.next_token().is_err());
-
-        let mut scanner = Scanner::new("^");
-        assert!(scanner.next_token().is_err());
-    }
-
-    #[test]
-    fn it_ignores_whitespace() {
-        let mut scanner = Scanner::new("    foo   (\ta,b\t) .");
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Atom(_)));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::LeftParen));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Atom(_)));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Comma));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Atom(_)));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::RightParen));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::Assertion));
-        assert!(matches!(scanner.next_token().unwrap(), Tok::End));
+        let mut scanner = Scanner::new(r#"foo(a, -42, "bar(\"hello,\t\nworld\").")."#);
+        assert!(matches!(scanner.next_token(), Ok(Atom(s)) if s == "foo"));
+        assert!(matches!(scanner.next_token(), Ok(LP)));
+        assert!(matches!(scanner.next_token(), Ok(Atom(s)) if s == "a"));
+        assert!(matches!(scanner.next_token(), Ok(Comma)));
+        assert!(matches!(scanner.next_token(), Ok(Minus)));
+        assert!(matches!(scanner.next_token(), Ok(Integer(n)) if n == 42));
+        assert!(matches!(scanner.next_token(), Ok(Comma)));
+        assert!(matches!(scanner.next_token(), Ok(Str(s)) if s == "bar(\"hello,\t\nworld\")."));
+        assert!(matches!(scanner.next_token(), Ok(RP)));
+        assert!(matches!(scanner.next_token(), Ok(Assertion)));
+        assert!(matches!(scanner.next_token(), Ok(End)));
+        assert!(matches!(scanner.next_token(), Ok(End)));
     }
 }

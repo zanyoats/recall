@@ -1,5 +1,4 @@
-use std::ptr;
-use std::slice;
+use std::convert::TryInto;
 
 use super::BYTE_SIZE;
 use super::U16_SIZE;
@@ -14,7 +13,6 @@ pub struct SizedBuf {
 impl SizedBuf {
     pub fn new(size: usize) -> Self {
         let data = vec![0u8; size];
-
         SizedBuf { size, data }
     }
 
@@ -54,241 +52,178 @@ impl SizedBuf {
         dst.data.copy_from_slice(&src.data);
     }
 
-    pub fn read_i8_offset(
-        &self,
-        offset: usize,
-    ) -> (usize, i8) {
-        unsafe {
-            let ptr = self.data.as_ptr().add(offset);
-            let val = ptr.cast::<i8>().read_unaligned();
-            (offset + BYTE_SIZE, val)
-        }
+    // ------ primitive reads/writes ------
+
+    pub fn read_i8_offset(&self, offset: usize) -> (usize, i8) {
+        let val = self.data[offset] as i8;
+        (offset + BYTE_SIZE, val)
     }
 
-    pub fn write_i8_offset(
-        &mut self,
-        offset: usize,
-        val: i8,
-    ) -> usize {
-        unsafe {
-            let ptr = self.data.as_mut_ptr().add(offset);
-            ptr.cast::<i8>().write(val);
-            offset + BYTE_SIZE
-        }
+    pub fn write_i8_offset(&mut self, offset: usize, val: i8) -> usize {
+        self.data[offset] = val as u8;
+        offset + BYTE_SIZE
     }
 
-    pub fn read_u8_offset(
-        &self,
-        offset: usize,
-    ) -> (usize, u8) {
-        unsafe {
-            let ptr = self.data.as_ptr().add(offset);
-            let val = ptr.read_unaligned();
-            (offset + BYTE_SIZE, val)
-        }
+    pub fn read_u8_offset(&self, offset: usize) -> (usize, u8) {
+        let val = self.data[offset];
+        (offset + BYTE_SIZE, val)
     }
 
-    pub fn write_u8_offset(
-        &mut self,
-        offset: usize,
-        val: u8,
-    ) -> usize {
-        unsafe {
-            let ptr = self.data.as_mut_ptr().add(offset);
-            ptr.write(val);
-            offset + BYTE_SIZE
-        }
+    pub fn write_u8_offset(&mut self, offset: usize, val: u8) -> usize {
+        self.data[offset] = val;
+        offset + BYTE_SIZE
     }
 
-    // Numbers format
-    // big endian for multi-byte numbers
-
-    pub fn read_u16_offset(
-        &self,
-        offset: usize,
-    ) -> (usize, u16) {
-        unsafe {
-            let ptr = self.data.as_ptr().add(offset);
-            let val = ptr.cast::<u16>().read_unaligned();
-            (offset + U16_SIZE, u16::from_be(val))
-        }
+    pub fn read_u16_offset(&self, offset: usize) -> (usize, u16) {
+        let start = offset;
+        let end = offset + U16_SIZE;
+        let bytes: [u8; 2] = self.data[start..end]
+            .try_into()
+            .expect("slice with incorrect length");
+        (end, u16::from_be_bytes(bytes))
     }
 
-    pub fn write_u16_offset(
-        &mut self,
-        offset: usize,
-        val: u16,
-    ) -> usize {
-        unsafe {
-            let ptr = self.data.as_mut_ptr().add(offset);
-            ptr.cast::<u16>().write(u16::to_be(val));
-            offset + U16_SIZE
-        }
+    pub fn write_u16_offset(&mut self, offset: usize, val: u16) -> usize {
+        let bytes = val.to_be_bytes();
+        let dst = &mut self.data[offset..offset + U16_SIZE];
+        dst.copy_from_slice(&bytes);
+        offset + U16_SIZE
     }
 
-    pub fn read_i32_offset(
-        &self,
-        offset: usize,
-    ) -> (usize, i32) {
-        unsafe {
-            let ptr = self.data.as_ptr().add(offset);
-            let val = ptr.cast::<i32>().read_unaligned();
-            (offset + U32_SIZE, i32::from_be(val))
-        }
+    pub fn read_i32_offset(&self, offset: usize) -> (usize, i32) {
+        let start = offset;
+        let end = offset + U32_SIZE;
+        let bytes: [u8; 4] = self.data[start..end]
+            .try_into()
+            .expect("slice with incorrect length");
+        (end, i32::from_be_bytes(bytes))
     }
 
-    pub fn write_i32_offset(
-        &mut self,
-        offset: usize,
-        val: i32,
-    ) -> usize {
-        unsafe {
-            let ptr = self.data.as_mut_ptr().add(offset);
-            ptr.cast::<i32>().write(i32::to_be(val));
-            offset + U32_SIZE
-        }
+    pub fn write_i32_offset(&mut self, offset: usize, val: i32) -> usize {
+        let bytes = val.to_be_bytes();
+        let dst = &mut self.data[offset..offset + U32_SIZE];
+        dst.copy_from_slice(&bytes);
+        offset + U32_SIZE
     }
 
-    pub fn read_u32_offset(
-        &self,
-        offset: usize,
-    ) -> (usize, u32) {
-        unsafe {
-            let ptr = self.data.as_ptr().add(offset);
-            let val = ptr.cast::<u32>().read_unaligned();
-            (offset + U32_SIZE, u32::from_be(val))
-        }
+    pub fn read_u32_offset(&self, offset: usize) -> (usize, u32) {
+        let start = offset;
+        let end = offset + U32_SIZE;
+        let bytes: [u8; 4] = self.data[start..end]
+            .try_into()
+            .expect("slice with incorrect length");
+        (end, u32::from_be_bytes(bytes))
     }
 
-    pub fn write_u32_offset(
-        &mut self,
-        offset: usize,
-        val: u32,
-    ) -> usize {
-        unsafe {
-            let ptr = self.data.as_mut_ptr().add(offset);
-            ptr.cast::<u32>().write(u32::to_be(val));
-            offset + U32_SIZE
-        }
+    pub fn write_u32_offset(&mut self, offset: usize, val: u32) -> usize {
+        let bytes = val.to_be_bytes();
+        let dst = &mut self.data[offset..offset + U32_SIZE];
+        dst.copy_from_slice(&bytes);
+        offset + U32_SIZE
     }
 
-    // Atom format
-
-    // <i8>           (signed) byte is the length (max is 127)
-    // <length bytes> string data
+    // ------ atom (signed-length byte + UTF-8) ------
 
     pub fn read_atom_offset(&self, offset: usize) -> (usize, String) {
-        unsafe {
-            let ptr = self.data.as_ptr().add(offset);
-            let len = ptr.cast::<i8>().read_unaligned();
-            let ptr= ptr.add(BYTE_SIZE);
-            let val =
-                String::from_utf8(slice::from_raw_parts(
-                    ptr,
-                    len as usize,
-                ).to_vec())
-                .unwrap();
-
-            (offset + BYTE_SIZE + len as usize, val)
-        }
+        // 1) length as signed i8
+        let len = self.data[offset] as i8;
+        let len = len as usize;
+        // 2) next `len` bytes
+        let start = offset + BYTE_SIZE;
+        let end = start + len;
+        let val = String::from_utf8(self.data[start..end].to_vec())
+            .expect("invalid UTF-8 in atom");
+        (end, val)
     }
 
     pub fn write_atom_offset(&mut self, offset: usize, val: &str) -> usize {
-        assert!(val.len() > 0);
-        assert!(val.len() <= 127);
-
-        unsafe {
-            let ptr = self.data.as_mut_ptr().add(offset);
-            ptr.cast::<i8>().write(val.len() as i8);
-            let ptr= ptr.add(BYTE_SIZE);
-            ptr::copy_nonoverlapping(
-                val.as_ptr(),
-                ptr,
-                val.len(),
-            );
-
-            offset + BYTE_SIZE + val.len() as usize
-        }
+        assert!(val.len() > 0 && val.len() <= 127);
+        // 1) write length as i8
+        self.data[offset] = val.len() as u8;
+        // 2) write the UTF-8 bytes
+        let start = offset + BYTE_SIZE;
+        let end = start + val.len();
+        self.data[start..end].copy_from_slice(val.as_bytes());
+        end
     }
 
-    // String format
-
-    // <u8>           byte is the length (max is 255)
-    // <length bytes> string data
-    // <u32>          4 bytes for continuation or overflow page num
+    // ------ string (u8-length + UTF-8 + u32 overflow) ------
 
     pub fn read_string_offset(&self, offset: usize) -> (usize, String) {
-        unsafe {
-            let ptr = self.data.as_ptr().add(offset);
-            let len = ptr.cast::<u8>().read_unaligned();
-            let ptr = ptr.add(BYTE_SIZE);
-            let val =
-                String::from_utf8(slice::from_raw_parts(
-                    ptr,
-                    len as usize,
-                ).to_vec())
-                .unwrap();
-            let ptr = ptr.add(len as usize);
-            let overflow_page_num = ptr.cast::<u32>().read_unaligned();
-            let overflow_page_num = u32::from_be(overflow_page_num);
-            assert!(overflow_page_num == 0);
-
-            (offset + BYTE_SIZE + len as usize + U32_SIZE, val)
-        }
+        // 1) length as u8
+        let len = self.data[offset] as usize;
+        // 2) UTF-8 payload
+        let start = offset + BYTE_SIZE;
+        let end = start + len;
+        let val = String::from_utf8(self.data[start..end].to_vec())
+            .expect("invalid UTF-8 in string");
+        // 3) overflow page (4 bytes BE)
+        let ostart = end;
+        let oend = ostart + U32_SIZE;
+        let bytes: [u8; 4] = self.data[ostart..oend]
+            .try_into()
+            .expect("overflow slice wrong length");
+        let overflow = u32::from_be_bytes(bytes);
+        assert!(overflow == 0);
+        (oend, val)
     }
 
     pub fn write_string_offset(&mut self, offset: usize, val: &str) -> usize {
-        unsafe {
-            let ptr = self.data.as_mut_ptr().add(offset);
-            ptr.cast::<u8>().write(val.len().try_into().unwrap());
-            let ptr = ptr.add(BYTE_SIZE);
-            ptr::copy_nonoverlapping(
-                val.as_ptr(),
-                ptr,
-                val.len(),
-            );
-            let ptr = ptr.add(val.len());
-            ptr.cast::<u32>().write(u32::to_be(0));
-
-            offset + BYTE_SIZE + val.len() as usize + U32_SIZE
-        }
+        // 1) length
+        assert!(val.len() <= 255);
+        self.data[offset] = val.len() as u8;
+        // 2) UTF-8 bytes
+        let start = offset + BYTE_SIZE;
+        let end = start + val.len();
+        self.data[start..end].copy_from_slice(val.as_bytes());
+        // 3) write zero overflow u32
+        let ostart = end;
+        let oend = ostart + U32_SIZE;
+        let zero_bytes = 0u32.to_be_bytes();
+        self.data[ostart..oend].copy_from_slice(&zero_bytes);
+        oend
     }
 
-    // Bytes format
-
-    // <u8>           byte is the length (max is 255)
-    // <length bytes> bytes
-    // <u32>          4 bytes for continuation or overflow page num
+    // ------ bytes (u8-length + raw + u32 overflow) ------
 
     pub fn read_bytes_offset(&self, offset: usize) -> (usize, Vec<u8>) {
-        unsafe {
-            let ptr = self.data.as_ptr().add(offset);
-            let len = ptr.cast::<u8>().read_unaligned();
-            let ptr = ptr.add(BYTE_SIZE);
-            let val = slice::from_raw_parts(ptr, len as usize).to_vec();
-            let ptr = ptr.add(len as usize);
-            let overflow_page_num = ptr.cast::<u32>().read_unaligned();
-            let overflow_page_num = u32::from_be(overflow_page_num);
-            assert!(overflow_page_num == 0);
+        // length prefix
+        let len = self.data[offset] as usize;
+        // payload
+        let start  = offset + BYTE_SIZE;
+        let end    = start + len;
+        let val    = self.data[start..end].to_vec();
+        // overflow page
+        let ostart = end;
+        let oend   = ostart + U32_SIZE;
+        let bytes: [u8; 4] = self.data[ostart..oend]
+            .try_into()
+            .expect("overflow slice wrong length");
+        let overflow = u32::from_be_bytes(bytes);
 
-            (offset + BYTE_SIZE + len as usize + U32_SIZE, val)
+        // <— instead of panic with just “overflow == 0”, print what we actually got
+        if overflow != 0 {
+            eprintln!(
+                "⚠️ read_bytes_offset @ offset {}: len={} payload_bytes[{}..{}], overflow={}",
+                offset, len, start, end, overflow
+            );
+            // you can still panic if you like:
+            panic!("unexpected overflow page num {}", overflow);
         }
+
+        (oend, val)
     }
 
     pub fn write_bytes_offset(&mut self, offset: usize, val: &[u8]) -> usize {
-        unsafe {
-            let ptr = self.data.as_mut_ptr().add(offset);
-            ptr.cast::<u8>().write(val.len().try_into().unwrap());
-            let ptr = ptr.add(BYTE_SIZE);
-            ptr::copy_nonoverlapping(
-                val.as_ptr(),
-                ptr,
-                val.len(),
-            );
-            let ptr = ptr.add(val.len());
-            ptr.cast::<u32>().write(u32::to_be(0));
-
-            offset + BYTE_SIZE + val.len() as usize + U32_SIZE
-        }
+        assert!(val.len() <= 255);
+        self.data[offset] = val.len() as u8;
+        let start = offset + BYTE_SIZE;
+        let end = start + val.len();
+        self.data[start..end].copy_from_slice(val);
+        let ostart = end;
+        let oend = ostart + U32_SIZE;
+        let zero_bytes = 0u32.to_be_bytes();
+        self.data[ostart..oend].copy_from_slice(&zero_bytes);
+        oend
     }
 }

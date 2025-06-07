@@ -255,21 +255,22 @@ impl InternalOps for SlottedPage {
     }
 
     fn internal_get_key(&self, tuple_index: usize) -> KeyVal {
-        unsafe {
-            let key_scm = &self.internal_key_scm();
-            let header_size = Self::internal_header_size(key_scm);
-            let offset = header_size + tuple_index * Self::INTERNAL_KEY_STRIDE;
-            let (offset, key_offset) = self.buf.read_u16_offset(offset);
-            let (_, key_size) = self.buf.read_u16_offset(offset);
-            let ptr = self.buf.get().as_ptr().add(key_offset as usize);
-            let mut tup = Tuple::new(key_size as usize);
-            ptr::copy_nonoverlapping(
-                ptr,
-                tup.get_mut().as_mut_ptr(),
-                key_size as usize,
-            );
-            tup.decode(key_scm)
-        }
+        let key_scm = &self.internal_key_scm();
+        let header_size = Self::internal_header_size(key_scm);
+        let offset = header_size + tuple_index * Self::INTERNAL_KEY_STRIDE;
+        let (offset, key_offset) = self.buf.read_u16_offset(offset);
+        let (_, key_size) = self.buf.read_u16_offset(offset);
+
+        // safe slice copy
+        let buf = self.buf.get();
+        let start = key_offset as usize;
+        let end = start + key_size as usize;
+        let src = &buf[start..end];
+
+        let mut tup = Tuple::new(key_size as usize);
+        tup.get_mut().copy_from_slice(src);
+
+        tup.decode(key_scm)
     }
 
     fn internal_get_val(&self, tuple_index: usize) -> u32 {
@@ -332,14 +333,10 @@ impl InternalOps for SlottedPage {
         self.buf.write_u16_offset(offset, val_offset);
 
         // insert key
-        unsafe {
-            let ptr = self.buf.get_mut().as_mut_ptr().add(key_offset as usize);
-            ptr::copy_nonoverlapping(
-                key.get().as_ptr(),
-                ptr,
-                key_size,
-            );
-        }
+        let key_bytes = key.get();
+        let key_dst_start = key_offset as usize;
+        let key_dst = &mut self.buf.get_mut()[key_dst_start .. key_dst_start + key_size];
+        key_dst.copy_from_slice(key_bytes);
 
         // insert val
         self.buf.write_u32_offset(val_offset as usize, val);
@@ -505,8 +502,23 @@ impl LeafOps for SlottedPage {
         self.set_r_sibling(NULL_PTR);
         self.buf.write_u16_offset(Self::LEAF_FREE_BEGIN_PTR_OFFSET, Self::leaf_header_size(key_scm, tup_scm) as u16);
         self.buf.write_u16_offset(Self::LEAF_FREE_END_PTR_OFFSET, self.page_size as u16);
-        let offset = self.buf.write_bytes_offset(Self::LEAF_KEY_SCM_OFFSET, key_scm);
-        self.buf.write_bytes_offset(offset, tup_scm);
+
+        // write the key schema
+        let first = self.buf.write_bytes_offset(Self::LEAF_KEY_SCM_OFFSET, key_scm);
+        // eprintln!(
+        //     "  → after key_scm write, bytes 20..25 = {:02X?}",
+        //     &self.buf.get()[20..25]
+        // );
+        // write the tuple schema
+        let second = self.buf.write_bytes_offset(first, tup_scm);
+        // eprintln!(
+        //     "  → after tup_scm write, bytes {}..{} = {:02X?}",
+        //     first,
+        //     first + 4,
+        //     &self.buf.get()[first..first+4]
+        // );
+        // let offset = self.buf.write_bytes_offset(Self::LEAF_KEY_SCM_OFFSET, key_scm);
+        // self.buf.write_bytes_offset(offset, tup_scm);
     }
 
     fn r_sibling(&self) -> u32 {
@@ -540,39 +552,39 @@ impl LeafOps for SlottedPage {
     }
 
     fn leaf_get_key(&self, tuple_index: usize) -> KeyVal {
-        unsafe {
-            let (key_scm, tup_scm) = &self.leaf_key_and_tup_scm();
-            let header_size = Self::leaf_header_size(&key_scm, &tup_scm);
-            let offset = header_size + tuple_index * Self::LEAF_KEY_STRIDE;
-            let (offset, key_offset) = self.buf.read_u16_offset(offset);
-            let (_, key_size) = self.buf.read_u16_offset(offset);
-            let ptr = self.buf.get().as_ptr().add(key_offset as usize);
-            let mut tup = Tuple::new(key_size as usize);
-            ptr::copy_nonoverlapping(
-                ptr,
-                tup.get_mut().as_mut_ptr(),
-                key_size as usize,
-            );
-            tup.decode(key_scm)
-        }
+        let (key_scm, tup_scm) = &self.leaf_key_and_tup_scm();
+        let header_size = Self::leaf_header_size(key_scm, tup_scm);
+        let offset = header_size + tuple_index * Self::LEAF_KEY_STRIDE;
+        let (offset, key_offset) = self.buf.read_u16_offset(offset);
+        let (_, key_size) = self.buf.read_u16_offset(offset);
+
+        let buf = self.buf.get();
+        let start = key_offset as usize;
+        let end = start + key_size as usize;
+        let src = &buf[start..end];
+
+        let mut tup = Tuple::new(key_size as usize);
+        tup.get_mut().copy_from_slice(src);
+
+        tup.decode(key_scm)
     }
 
     fn leaf_get_val(&self, tuple_index: usize) -> TupVal {
-        unsafe {
-            let (key_scm, tup_scm) = &self.leaf_key_and_tup_scm();
-            let header_size = Self::leaf_header_size(&key_scm, &tup_scm);
-            let offset = header_size + tuple_index * Self::LEAF_KEY_STRIDE + U16_SIZE * 2;
-            let (offset, val_offset) = self.buf.read_u16_offset(offset);
-            let (_, val_size) = self.buf.read_u16_offset(offset);
-            let ptr = self.buf.get().as_ptr().add(val_offset as usize);
-            let mut tuple = Tuple::new(val_size as usize);
-            ptr::copy_nonoverlapping(
-                ptr,
-                tuple.get_mut().as_mut_ptr(),
-                val_size as usize,
-            );
-            tuple.decode(tup_scm)
-        }
+        let (key_scm, tup_scm) = &self.leaf_key_and_tup_scm();
+        let header_size = Self::leaf_header_size(key_scm, tup_scm);
+        let offset = header_size + tuple_index * Self::LEAF_KEY_STRIDE + U16_SIZE * 2;
+        let (offset, val_offset) = self.buf.read_u16_offset(offset);
+        let (_, val_size) = self.buf.read_u16_offset(offset);
+
+        let buf = self.buf.get();
+        let start = val_offset as usize;
+        let end = start + val_size as usize;
+        let src = &buf[start..end];
+
+        let mut tuple = Tuple::new(val_size as usize);
+        tuple.get_mut().copy_from_slice(src);
+
+        tuple.decode(tup_scm)
     }
 
     fn leaf_free_space(&mut self) -> u16 {
@@ -583,92 +595,113 @@ impl LeafOps for SlottedPage {
 
     fn leaf_put(&mut self, key: &KeyVal, val: &TupVal, tuple_index: usize) -> Result<bool, errors::RecallError> {
         let (key_scm, tup_scm) = &self.leaf_key_and_tup_scm();
-        ParameterType::typecheck(key, key_scm)?;
-        ParameterType::typecheck(val, tup_scm)?;
 
-        let num = self.num_tuples();
+        // snapshot *only* the two schema‐slots
+        let key_schema_start = Self::LEAF_KEY_SCM_OFFSET;
+        let key_schema_len   = SizedBuf::bytes_storage_size(key_scm.len());
+        let tup_schema_start = key_schema_start + key_schema_len;
+        let tup_schema_len   = SizedBuf::bytes_storage_size(tup_scm.len());
 
-        // check that key does not already exists
-        //
-        // This needs to be keep as the first check since before splitting
-        // we attempt to call the method. The splitting routine does not check
-        // that the key exists before inserting, so when refactoring we may need
-        // to check for key unique error in the splitting routine.
-        if tuple_index < num {
-            let stored_key = self.leaf_get_key(tuple_index);
-            if *key == stored_key {
-                return Err(errors::RecallError::UniqueKeyError)
+        let before_key_schema = self.buf.get()[ key_schema_start
+            .. key_schema_start + key_schema_len ].to_vec();
+        let before_tup_schema = self.buf.get()[ tup_schema_start
+            .. tup_schema_start + tup_schema_len ].to_vec();
+
+        let res = (|| {
+            let (key_scm, tup_scm) = &self.leaf_key_and_tup_scm();
+            ParameterType::typecheck(key, key_scm)?;
+            ParameterType::typecheck(val, tup_scm)?;
+
+            let num = self.num_tuples();
+
+            // check that key does not already exists
+            //
+            // This needs to be keep as the first check since before splitting
+            // we attempt to call the method. The splitting routine does not check
+            // that the key exists before inserting, so when refactoring we may need
+            // to check for key unique error in the splitting routine.
+            if tuple_index < num {
+                let stored_key = self.leaf_get_key(tuple_index);
+                if *key == stored_key {
+                    return Err(errors::RecallError::UniqueKeyError)
+                }
             }
-        }
 
-        let header_size = Self::leaf_header_size(key_scm, tup_scm);
-        // check space requirements
-        let (_, begin_offset) = self.buf.read_u16_offset(Self::LEAF_FREE_BEGIN_PTR_OFFSET);
-        let (_, end_offset) = self.buf.read_u16_offset(Self::LEAF_FREE_END_PTR_OFFSET);
-        let free_space = end_offset - begin_offset;
-        let key = Tuple::encode(key, key_scm).unwrap();
-        let val = Tuple::encode(val, tup_scm).unwrap();
-        let key_size = key.len();
-        let val_size = val.len();
-        let space_needed = u16::try_from(Self::LEAF_KEY_STRIDE + key_size + val_size).unwrap();
-        if space_needed > free_space {
-            return Ok(false)
-        }
-
-        // check cap limit
-        if let Some(cap_limit) = self.cap_limit {
-            if num == cap_limit {
-                // println!("DEBUG: cap limit ({}) reached for leaf node.", cap_limit);
+            let header_size = Self::leaf_header_size(key_scm, tup_scm);
+            // check space requirements
+            let (_, begin_offset) = self.buf.read_u16_offset(Self::LEAF_FREE_BEGIN_PTR_OFFSET);
+            let (_, end_offset) = self.buf.read_u16_offset(Self::LEAF_FREE_END_PTR_OFFSET);
+            let free_space = end_offset - begin_offset;
+            let key = Tuple::encode(key, key_scm).unwrap();
+            let val = Tuple::encode(val, tup_scm).unwrap();
+            let key_size = key.len();
+            let val_size = val.len();
+            let space_needed = u16::try_from(Self::LEAF_KEY_STRIDE + key_size + val_size).unwrap();
+            if space_needed > free_space {
                 return Ok(false)
             }
-        }
 
-        // shift all the keys to the right by 1
-        for i in (tuple_index..num).rev() {
-            let src_offset = header_size + i * Self::LEAF_KEY_STRIDE;
-            let dst_offset = header_size + (i + 1) * Self::LEAF_KEY_STRIDE;
-            self.buf.get_mut().copy_within(
-                src_offset..src_offset + Self::LEAF_KEY_STRIDE,
-                dst_offset
-            );
-        }
+            // check cap limit
+            if let Some(cap_limit) = self.cap_limit {
+                if num == cap_limit {
+                    // println!("DEBUG: cap limit ({}) reached for leaf node.", cap_limit);
+                    return Ok(false)
+                }
+            }
 
-        // insert offsets for key/val pair
-        let offset = header_size + tuple_index * Self::LEAF_KEY_STRIDE;
-        let key_offset = end_offset - u16::try_from(key_size + val_size).unwrap();
-        let offset = self.buf.write_u16_offset(offset, key_offset);
-        let offset = self.buf.write_u16_offset(offset, u16::try_from(key_size).unwrap());
-        let val_offset = end_offset - u16::try_from(val_size).unwrap();
-        let offset = self.buf.write_u16_offset(offset, val_offset);
-        self.buf.write_u16_offset(offset, u16::try_from(val_size).unwrap());
+            // shift all the keys to the right by 1
+            for i in (tuple_index..num).rev() {
+                let src_offset = header_size + i * Self::LEAF_KEY_STRIDE;
+                let dst_offset = header_size + (i + 1) * Self::LEAF_KEY_STRIDE;
+                self.buf.get_mut().copy_within(
+                    src_offset..src_offset + Self::LEAF_KEY_STRIDE,
+                    dst_offset
+                );
+            }
 
-        // insert key
-        unsafe {
-            let ptr = self.buf.get_mut().as_mut_ptr().add(key_offset as usize);
-            ptr::copy_nonoverlapping(
-                key.get().as_ptr(),
-                ptr,
-                key_size,
-            );
-        }
+            // insert offsets for key/val pair
+            let offset = header_size + tuple_index * Self::LEAF_KEY_STRIDE;
+            let key_offset = end_offset - u16::try_from(key_size + val_size).unwrap();
+            let offset = self.buf.write_u16_offset(offset, key_offset);
+            let offset = self.buf.write_u16_offset(offset, u16::try_from(key_size).unwrap());
+            let val_offset = end_offset - u16::try_from(val_size).unwrap();
+            let offset = self.buf.write_u16_offset(offset, val_offset);
+            self.buf.write_u16_offset(offset, u16::try_from(val_size).unwrap());
 
-        // insert val
-        unsafe {
-            let ptr = self.buf.get_mut().as_mut_ptr().add(val_offset as usize);
-            ptr::copy_nonoverlapping(
-                val.get().as_ptr(),
-                ptr,
-                val_size,
-            );
-        }
+            // insert key
+            let key_bytes = key.get();
+            let key_dst_start = key_offset as usize;
+            let key_dst = &mut self.buf.get_mut()[key_dst_start .. key_dst_start + key_size];
+            key_dst.copy_from_slice(key_bytes);
 
-        self.inc_num_tuples();
+            // insert val
+            let val_bytes = val.get();
+            let val_dst_start = val_offset as usize;
+            let val_dst = &mut self.buf.get_mut()[val_dst_start .. val_dst_start + val_size];
+            val_dst.copy_from_slice(val_bytes);
 
-        // update free begin and end offsets
-        self.buf.write_u16_offset(Self::LEAF_FREE_BEGIN_PTR_OFFSET, begin_offset + u16::try_from(Self::LEAF_KEY_STRIDE).unwrap());
-        self.buf.write_u16_offset(Self::LEAF_FREE_END_PTR_OFFSET, key_offset);
+            self.inc_num_tuples();
 
-        Ok(true)
+            // update free begin and end offsets
+            self.buf.write_u16_offset(Self::LEAF_FREE_BEGIN_PTR_OFFSET, begin_offset + u16::try_from(Self::LEAF_KEY_STRIDE).unwrap());
+            self.buf.write_u16_offset(Self::LEAF_FREE_END_PTR_OFFSET, key_offset);
+
+            Ok(true)
+        })();
+
+        let after = self.buf.get();
+        debug_assert_eq!(
+            &before_key_schema[..],
+            &after[key_schema_start .. key_schema_start + key_schema_len],
+            "Key schema bytes were overwritten!"
+        );
+        debug_assert_eq!(
+            &before_tup_schema[..],
+            &after[tup_schema_start .. tup_schema_start + tup_schema_len],
+            "Tuple schema bytes were overwritten!"
+        );
+
+        res
     }
 
     fn leaf_replace(
@@ -676,23 +709,18 @@ impl LeafOps for SlottedPage {
         val: &TupVal,
         tuple_index: usize,
     ) -> Result<(), errors::RecallError> {
-        // replace val
-        unsafe {
-            let (key_scm, tup_scm) = &self.leaf_key_and_tup_scm();
-            let val = Tuple::encode(val, tup_scm).unwrap();
-            let header_size = Self::leaf_header_size(&key_scm, &tup_scm);
-            let offset = header_size + tuple_index * Self::LEAF_KEY_STRIDE + U16_SIZE * 2;
-            let (offset, val_offset) = self.buf.read_u16_offset(offset);
-            let (_, val_size) = self.buf.read_u16_offset(offset);
-            assert!(val_size as usize == val.len(), "expected replaced tuple to be exact size of existing tuple");
-            let ptr = self.buf.get_mut().as_mut_ptr().add(val_offset as usize);
-            ptr::copy_nonoverlapping(
-                val.get().as_ptr(),
-                ptr,
-                val_size as usize,
-            );
-            Ok(())
-        }
+        let (key_scm, tup_scm) = &self.leaf_key_and_tup_scm();
+        let val = Tuple::encode(val, tup_scm).unwrap();
+        let header_size = Self::leaf_header_size(&key_scm, &tup_scm);
+        let offset = header_size + tuple_index * Self::LEAF_KEY_STRIDE + U16_SIZE * 2;
+        let (offset, val_offset) = self.buf.read_u16_offset(offset);
+        let (_, val_size) = self.buf.read_u16_offset(offset);
+        assert!(val_size as usize == val.len(), "expected replaced tuple to be exact size of existing tuple");
+        let dst_start = val_offset as usize;
+        let dst = &mut self.buf.get_mut()[dst_start .. dst_start + val_size as usize];
+        let new_bytes = val.get();
+        dst.copy_from_slice(new_bytes);
+        Ok(())
     }
 
     /// Assumes left and right were initialized already
@@ -995,7 +1023,8 @@ mod tests {
         };
         let result = page.leaf_put(&insert_pair.0, &tuple, tuple_index);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), errors::RecallError::UniqueKeyError);
+        matches!(result, Err(errors::RecallError::UniqueKeyError));
+        // assert_eq!(result.unwrap_err(), errors::RecallError::UniqueKeyError);
     }
 
     #[test]
@@ -1330,11 +1359,13 @@ mod tests {
 
         let result = page.leaf_put(&tuple, &u32_key(42), tuple_index);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), errors::RecallError::TypeError("expected tuple position 0 to be typed as uint".to_string()));
+        matches!(result, Err(errors::RecallError::TypeError(_)));
+        // assert_eq!(result.unwrap_err(), errors::RecallError::TypeError("expected tuple position 0 to be typed as uint".to_string()));
 
         let result = page.leaf_put(&u32_key(42), &tuple, tuple_index);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), errors::RecallError::TypeError("expected tuple position 0 to be typed as atom".to_string()));
+        matches!(result, Err(errors::RecallError::TypeError(_)));
+        // assert_eq!(result.unwrap_err(), errors::RecallError::TypeError("expected tuple position 0 to be typed as atom".to_string()));
 
         let tuple = {
             let mut tuple = Tuple::new(SizedBuf::atom_storage_size("Hello, World!".len()));

@@ -109,7 +109,7 @@ impl DB {
         Ok(db)
     }
 
-    fn get_predicates_object_btree(&self) -> Result<BPlusTree, errors::RecallError> {
+    pub fn get_predicates_object_btree(&self) -> Result<BPlusTree, errors::RecallError> {
         let root_page_num = {
             let btree =
                 BPlusTreeBuilder::new(Rc::clone(&self.pager), CATALOG_ROOT_PAGE_NUM)
@@ -136,46 +136,56 @@ impl DB {
         let key_scm = vec![format::UINT_TYPE];
         let predicates = self.get_predicates_object_btree()?;
         let arity = u32::try_from(tup_scm.len()).unwrap();
-        let root_page_num =
-            predicates
-            .pager
-            .borrow_mut()
-            .get_fresh_page_num();
 
-        // initialize new predicate root page
-        {
-            let pager = self.pager.borrow_mut();
-            let root_cell = pager.fetch(root_page_num);
-            let mut root = root_cell.borrow_mut();
-            root.leaf_initialize_node(
-                true,
-                &key_scm,
-                &tup_scm,
-            );
+        match self.get_predicate(name, arity) {
+            Ok(predicate) => {
+                predicate.btree.typecheck(&tup_scm)?;
+                Ok(predicate)
+            },
+            Err(errors::RecallError::PredicateNotFound(..)) => {
+                let root_page_num =
+                    predicates
+                    .pager
+                    .borrow_mut()
+                    .get_fresh_page_num();
+
+                // initialize new predicate root page
+                {
+                    let pager = self.pager.borrow_mut();
+                    let root_cell = pager.fetch(root_page_num);
+                    let mut root = root_cell.borrow_mut();
+                    root.leaf_initialize_node(
+                        true,
+                        &key_scm,
+                        &tup_scm,
+                    );
+                }
+
+                // insert new predicate
+                {
+                    let key = vec!{
+                        ParameterType::Atom(name.to_string()),
+                        ParameterType::UInt(arity),
+                    };
+                    let tup = vec!{
+                        ParameterType::Bytes(key_scm),              // KeyScm
+                        ParameterType::Bytes(tup_scm),              // TupScm
+                        ParameterType::UInt(root_page_num),         // RootPageNum
+                        ParameterType::UInt(0),                     // NextKey
+                        ParameterType::Atom("user".to_string()),    // User
+                    };
+                    predicates.insert(&key, &tup)?;
+                }
+
+                let btree =
+                    BPlusTreeBuilder::new(Rc::clone(&self.pager), root_page_num)
+                    .split_strategy_empty_page()
+                    .build();
+
+                Ok(Predicate::new(name.to_string(), arity, predicates, btree))
+            },
+            Err(err) => Err(err),
         }
-
-        // insert new predicate
-        {
-            let key = vec!{
-                ParameterType::Atom(name.to_string()),
-                ParameterType::UInt(arity),
-            };
-            let tup = vec!{
-                ParameterType::Bytes(key_scm),              // KeyScm
-                ParameterType::Bytes(tup_scm),              // TupScm
-                ParameterType::UInt(root_page_num),         // RootPageNum
-                ParameterType::UInt(0),                     // NextKey
-                ParameterType::Atom("user".to_string()),    // User
-            };
-            predicates.insert(&key, &tup)?;
-        }
-
-        let btree =
-            BPlusTreeBuilder::new(Rc::clone(&self.pager), root_page_num)
-            .split_strategy_empty_page()
-            .build();
-
-        Ok(Predicate::new(name.to_string(), arity, predicates, btree))
     }
 
     pub fn get_predicate(&mut self, name: &str, arity: u32) -> Result<Predicate, errors::RecallError> {
@@ -333,6 +343,10 @@ mod tests {
                 ParameterType::Int(42),
             ]).unwrap();
             pred_foo.assert(&vec![
+                ParameterType::Atom("apple".to_string()),
+                ParameterType::Int(42),
+            ]).unwrap();
+            pred_foo.assert(&vec![
                 ParameterType::Atom("lemon".to_string()),
                 ParameterType::Int(1337),
             ]).unwrap();
@@ -355,6 +369,7 @@ mod tests {
             .unwrap();
         let got: Vec<Vec<ParameterType>> = pred.iter_owned().collect();
         let want = vec![
+            vec![ParameterType::Atom("apple".to_string()), ParameterType::Int(42)],
             vec![ParameterType::Atom("apple".to_string()), ParameterType::Int(42)],
             vec![ParameterType::Atom("lemon".to_string()), ParameterType::Int(1337)],
         ];
@@ -384,8 +399,21 @@ mod tests {
         let got: Vec<Vec<ParameterType>> = pred.iter_owned().collect();
         let want = vec![
             vec![ParameterType::Atom("apple".to_string()), ParameterType::Int(42)],
+            vec![ParameterType::Atom("apple".to_string()), ParameterType::Int(42)],
             vec![ParameterType::Atom("lemon".to_string()), ParameterType::Int(1337)],
         ];
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn it_can_handle_duplicate_definitions() {
+        let fixture = Fixture::new("it_can_handle_duplicate_definitions.db");
+        let mut db =
+            DB::new(&fixture.temp_path)
+            .unwrap();
+
+        assert!(db.define_predicate("foo", vec![format::ATOM_TYPE, format::INT_TYPE]).is_ok());
+        assert!(db.define_predicate("foo", vec![format::ATOM_TYPE, format::INT_TYPE]).is_ok());
+        assert!(db.define_predicate("foo", vec![format::ATOM_TYPE, format::STRING_TYPE]).is_err());
     }
 }
