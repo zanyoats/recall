@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+rocksdb = "0.23.0"
+rustyline = "16.0.0"
+crossterm = "0.26"

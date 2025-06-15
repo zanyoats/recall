@@ -1,278 +1,326 @@
-use std::rc::Rc;
-use std::cell::RefCell;
 use std::path::Path;
+use std::path::PathBuf;
+use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::process;
 
-use crate::storage::engine::btree::BPlusTree;
-use crate::storage::engine::btree::BPlusTreeBuilder;
-use crate::storage::engine::btree::pager::Pager;
-use crate::storage::engine::btree::pager::PagerBuilder;
-use crate::storage::engine::btree::format;
-use crate::storage::engine::btree::format::page::LeafOps;
-use crate::storage::engine::btree::format::page::TupVal;
-use crate::storage::engine::btree::format::tuple::ParameterType;
-use crate::storage::engine::btree::format::CATALOG_ROOT_PAGE_NUM;
-use crate::storage::engine::btree::BPlusTreeIntoIter;
+use rocksdb::ColumnFamilyDescriptor;
+use rocksdb::IteratorMode;
+use rocksdb::Options;
+use rocksdb::TransactionDB;
+use rocksdb::TransactionDBOptions;
+use rocksdb::DBIteratorWithThreadMode;
+use rocksdb::PrefixRange;
+use rocksdb::TransactionOptions;
+use rocksdb::ReadOptions;
+use rocksdb::WriteOptions;
+use rocksdb::SingleThreaded;
+
+use crate::lang::parse::Term;
+use crate::storage::format;
+use crate::storage::tuple::Tuple;
+use crate::storage::tuple::ParameterType;
 use crate::errors;
 
-use super::engine::btree::format::PREDICATES_KEY;
-
 pub struct DB {
-    pager: Rc<RefCell<Pager>>,
+    db: Option<TransactionDB<SingleThreaded>>,
+    persist: bool,
+    path: PathBuf,
 }
 
-pub struct Predicate {
+pub struct TransactionOp<'a> {
+    db: &'a TransactionDB<SingleThreaded>,
+    pub tx: rocksdb::Transaction<'a, TransactionDB<SingleThreaded>>,
+}
+
+pub struct Predicate<'a> {
+    db: &'a TransactionDB<SingleThreaded>,
+    tx: &'a rocksdb::Transaction<'a, TransactionDB<SingleThreaded>>,
     pub name: String,
-    pub arity: u32,
-    predicates: BPlusTree,
-    btree: BPlusTree,
+    pub tup_scm: Vec<u8>,
 }
 
-pub struct PredicateIterator {
-    btree_iter: BPlusTreeIntoIter,
-}
+impl<'a> IntoIterator for Predicate<'a> {
+    type Item = Term;
 
-impl PredicateIterator {
-    pub fn new(btree_iter: BPlusTreeIntoIter) -> Self {
-        PredicateIterator { btree_iter }
+    type IntoIter = PredicateIntoIterator<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        PredicateIntoIterator::new(self)
     }
+}
+
+pub struct PredicateIntoIterator<'a> {
+    iter: DBIteratorWithThreadMode<'a, rocksdb::Transaction<'a, TransactionDB>>,
+    pub tup_scm: Vec<u8>,
+}
+
+pub struct PredicatesIterator<'a> {
+    db: &'a TransactionDB<SingleThreaded>,
+    tx: &'a rocksdb::Transaction<'a, TransactionDB<SingleThreaded>>,
+    iter: DBIteratorWithThreadMode<'a, rocksdb::Transaction<'a, TransactionDB>>,
+}
+
+pub struct RulesIterator<'a> {
+    iter: DBIteratorWithThreadMode<'a, rocksdb::Transaction<'a, TransactionDB>>,
 }
 
 impl DB {
     pub fn new<P: AsRef<Path>>(file_path: P) -> Result<Self, errors::RecallError> {
-        let pager =
-            PagerBuilder::new(file_path)
-            .build();
-        let stored_pages = pager.stored_pages;
-        let db = DB { pager: Rc::new(RefCell::new(pager)) };
-
-        if stored_pages != 0 {
-            return Ok(db);
-        }
-
-        // bootstrap file format
-
-        // initialize root page
-        {
-            let pager = db.pager.borrow_mut();
-
-            let root_cell = pager.fetch(CATALOG_ROOT_PAGE_NUM);
-            let mut root = root_cell.borrow_mut();
-            root.leaf_initialize_node(
-                true,
-                &[format::UINT_TYPE], // predicates key const
-                &[format::UINT_TYPE], // root page num
-            );
-        }
-
-        // insert predicates object type into catalog
-        let predicates_root_page_num = {
-            let btree =
-                BPlusTreeBuilder::new(Rc::clone(&db.pager), CATALOG_ROOT_PAGE_NUM)
-                .split_strategy_empty_page()
-                .build();
-            let root_page_num = {
-                let mut pager = btree.pager.borrow_mut();
-                pager.get_fresh_page_num()
-            };
-            let key = vec!{
-                ParameterType::UInt(PREDICATES_KEY)
-            };
-            let val = vec!{
-                ParameterType::UInt(root_page_num)
-            };
-            btree.insert(&key, &val)?;
-            root_page_num
-        };
-
-        // initialize predicates predicate object page
-        {
-            let pager = db.pager.borrow_mut();
-
-            let root_cell = pager.fetch(predicates_root_page_num);
-            let mut root = root_cell.borrow_mut();
-            root.leaf_initialize_node(
-                true,
-                &[
-                    format::ATOM_TYPE,  // Name
-                    format::UINT_TYPE,  // Arity
-                ],
-                &[
-                    format::BYTES_TYPE, // KeyScm
-                    format::BYTES_TYPE, // TupScm
-                    format::UINT_TYPE,  // RootPageNum
-                    format::UINT_TYPE,  // NextKey
-                    format::ATOM_TYPE,  // User
-                ],
-            );
-        }
-
-        Ok(db)
+        DB::setup_db(file_path.as_ref(), true)
     }
 
-    pub fn get_predicates_object_btree(&self) -> Result<BPlusTree, errors::RecallError> {
-        let root_page_num = {
-            let btree =
-                BPlusTreeBuilder::new(Rc::clone(&self.pager), CATALOG_ROOT_PAGE_NUM)
-                .split_strategy_empty_page()
-                .build();
-            let key = vec!{
-                ParameterType::UInt(format::PREDICATES_KEY)
-            };
-            let tup =
-                btree
-                .find(&key)?
-                .expect("expected tuple found by predicates key");
-            tup[0].get_uint()
-        };
-
-        Ok(
-            BPlusTreeBuilder::new(Rc::clone(&self.pager), root_page_num)
-            .split_strategy_half_full_page()
-            .build()
-        )
+    pub fn new_temp() -> Result<Self, errors::RecallError> {
+        let temp_path = DB::temp_path()?;
+        DB::setup_db(&temp_path, false)
     }
 
-    pub fn define_predicate(&mut self, name: &str, tup_scm: Vec<u8>) -> Result<Predicate, errors::RecallError> {
-        let key_scm = vec![format::UINT_TYPE];
-        let predicates = self.get_predicates_object_btree()?;
-        let arity = u32::try_from(tup_scm.len()).unwrap();
-
-        match self.get_predicate(name, arity) {
-            Ok(predicate) => {
-                predicate.btree.typecheck(&tup_scm)?;
-                Ok(predicate)
-            },
-            Err(errors::RecallError::PredicateNotFound(..)) => {
-                let root_page_num =
-                    predicates
-                    .pager
-                    .borrow_mut()
-                    .get_fresh_page_num();
-
-                // initialize new predicate root page
-                {
-                    let pager = self.pager.borrow_mut();
-                    let root_cell = pager.fetch(root_page_num);
-                    let mut root = root_cell.borrow_mut();
-                    root.leaf_initialize_node(
-                        true,
-                        &key_scm,
-                        &tup_scm,
-                    );
-                }
-
-                // insert new predicate
-                {
-                    let key = vec!{
-                        ParameterType::Atom(name.to_string()),
-                        ParameterType::UInt(arity),
-                    };
-                    let tup = vec!{
-                        ParameterType::Bytes(key_scm),              // KeyScm
-                        ParameterType::Bytes(tup_scm),              // TupScm
-                        ParameterType::UInt(root_page_num),         // RootPageNum
-                        ParameterType::UInt(0),                     // NextKey
-                        ParameterType::Atom("user".to_string()),    // User
-                    };
-                    predicates.insert(&key, &tup)?;
-                }
-
-                let btree =
-                    BPlusTreeBuilder::new(Rc::clone(&self.pager), root_page_num)
-                    .split_strategy_empty_page()
-                    .build();
-
-                Ok(Predicate::new(name.to_string(), arity, predicates, btree))
-            },
-            Err(err) => Err(err),
-        }
+    fn temp_path() -> Result<PathBuf, errors::RecallError> {
+        let mut path = std::env::temp_dir();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let pid = process::id();
+        let unique_name = format!("recall_{}_{}", pid, timestamp);
+        path.push(unique_name);
+        fs::create_dir(&path)?;
+        Ok(path)
     }
 
-    pub fn get_predicate(&mut self, name: &str, arity: u32) -> Result<Predicate, errors::RecallError> {
-        let predicates = self.get_predicates_object_btree()?;
-        let key = vec!{
-            ParameterType::Atom(name.to_string()),
-            ParameterType::UInt(arity),
-        };
+    fn setup_db(path: &Path, persist: bool) -> Result<Self, errors::RecallError> {
+        let mut db_opts = Options::default();
+        db_opts.create_if_missing(true);
+        db_opts.create_missing_column_families(true);
+        db_opts.set_max_open_files(500);
+        db_opts.increase_parallelism(4);
 
-        predicates
-        .find(&key)?
-        .map_or_else(
-            || {
-                Err(errors::RecallError::PredicateNotFound(name.to_string(), arity))
-            },
-            |tup| {
-                let root_page_num = *&tup[2].get_uint();
-                let btree =
-                    BPlusTreeBuilder::new(Rc::clone(&self.pager), root_page_num)
-                    .split_strategy_empty_page()
-                    .build();
-                Ok(Predicate::new(name.to_string(), arity, predicates, btree))
-            }
-        )
+        let cf_names = vec!["default", "schema", "data", "rules"];
+        let cf_descriptors: Vec<ColumnFamilyDescriptor> = cf_names
+            .iter()
+            .map(|name| ColumnFamilyDescriptor::new(*name, Options::default()))
+            .collect();
+
+        let tx_db_opts = TransactionDBOptions::default();
+        let db: TransactionDB<SingleThreaded> = TransactionDB::open_cf_descriptors(
+            &db_opts,
+            &tx_db_opts,
+            path,
+            cf_descriptors,
+        )?;
+
+        Ok(Self { db: Some(db), persist, path: path.to_path_buf() })
     }
 
-    pub fn save(&self) {
-        let pager = self.pager.borrow();
-        pager.flush_all_pages();
+    pub fn begin_transaction(&self) -> TransactionOp {
+        let mut txn_opts = TransactionOptions::default();
+        txn_opts.set_snapshot(true);
+        let write_opts = WriteOptions::default();
+        let db = self.db.as_ref().unwrap();
+        let tx = db.transaction_opt(&write_opts, &txn_opts);
+        TransactionOp { db, tx }
     }
 }
 
-impl Predicate {
-    pub fn new(name: String, arity: u32, predicates: BPlusTree, btree: BPlusTree) -> Self {
-        Predicate { name, arity, predicates, btree }
-    }
-
-    pub fn iter_owned(&self) -> PredicateIterator {
-        PredicateIterator::new(self.btree.clone().into_iter())
-    }
-
-    pub fn assert(&self, val: &TupVal) -> Result<(), errors::RecallError> {
-        let pred_key = vec!{
-            ParameterType::Atom(self.name.to_string()),
-            ParameterType::UInt(self.arity),
-        };
-
-        self
-        .predicates
-        .find(&pred_key)?
-        .map_or_else(
-            || {
-                Err(errors::RecallError::PredicateNotFound(self.name.to_string(), self.arity))
-            },
-            |mut pred_tup| {
-                let next_key = pred_tup[3].get_uint();
-
-                // insert tuple
-                let gen_key = vec!{
-                    ParameterType::UInt(next_key)
-                };
-                self
-                .btree
-                .insert(&gen_key, val)?;
-
-                // increment next key
-                pred_tup[3] = ParameterType::UInt(next_key + 1);
-                self
-                .predicates
-                .replace(&pred_key, &pred_tup)?;
-
-                Ok(())
+impl Drop for DB {
+    fn drop(&mut self) {
+        if !self.persist {
+            // Take and drop the DB to ensure RocksDB file handles are closed
+            if let Some(db) = self.db.take() {
+                drop(db);
             }
-        )
-    }
 
-    // pub fn retract(&self, data: &[ParameterType]) -> Result<(), errors::RecallError> {
-    //     todo!()
-    // }
+            if let Err(e) = fs::remove_dir_all(&self.path) {
+                eprintln!("Warning: failed to delete temp RocksDB directory {:?}: {}", self.path, e);
+            }
+        }
+    }
 }
 
-impl Iterator for PredicateIterator {
-    type Item = Vec<ParameterType>;
+impl<'a> TransactionOp<'a> {
+    pub fn assert_rule(&self, rule_text: String) -> Result<(), errors::RecallError> {
+        let rules_cf = self.db.cf_handle("rules").unwrap();
+        self.tx.put_cf(rules_cf, rule_text.as_bytes(), b"")?;
+        Ok(())
+    }
+
+    pub fn retract_rule(&self, rule_text: String) -> Result<(), errors::RecallError> {
+        let rules_cf = self.db.cf_handle("rules").unwrap();
+        self.tx.delete_cf(rules_cf, rule_text.as_bytes())?;
+        Ok(())
+    }
+
+    pub fn define_predicate(&self, name: &str, mut tup_scm: Vec<u8>) -> Result<Predicate, errors::RecallError> {
+        let key_scm = vec![format::ATOM_TYPE, format::INT_TYPE];
+        let arity = tup_scm.len().try_into().unwrap();
+
+        let mut tup_scm0 = vec![format::ATOM_TYPE];
+        tup_scm0.append(&mut tup_scm);
+
+        let schema_cf = self.db.cf_handle("schema").unwrap();
+        let key = Tuple::encode(
+            &[ParameterType::Atom(name.to_string()), ParameterType::Int(arity)],
+            &key_scm,
+        )?;
+
+        if let Some(existing_tup_scm) = self.tx.get_cf(schema_cf, key.get())? {
+            if existing_tup_scm == tup_scm0 {
+                Ok(Predicate { db: self.db, tx: &self.tx, name: name.to_string(), tup_scm: tup_scm0 })
+            } else {
+                Err(errors::RecallError::TypeError(format!(
+                    "predicate type defined does not typecheck with re-declaration",
+                )))
+            }
+        } else {
+            self.tx.put_cf(schema_cf, key.get(), &tup_scm0)?;
+
+            Ok(Predicate { db: self.db, tx: &self.tx, name: name.to_string(), tup_scm: tup_scm0 })
+        }
+    }
+
+    pub fn get_predicate(&self, name: &str, arity: i32) -> Result<Predicate, errors::RecallError> {
+        let key_scm = vec![format::ATOM_TYPE, format::INT_TYPE];
+
+        let schema_cf = self.db.cf_handle("schema").unwrap();
+        let key = Tuple::encode(
+            &[ParameterType::Atom(name.to_string()), ParameterType::Int(arity)],
+            &key_scm,
+        )?;
+
+        if let Some(tup_scm) = self.tx.get_cf(schema_cf, key.get())? {
+            Ok(Predicate { db: self.db, tx: &self.tx, name: name.to_string(), tup_scm })
+        } else {
+            Err(errors::RecallError::PredicateNotFound(name.to_string(), arity))
+        }
+    }
+
+    pub fn predicates(&'a self) -> PredicatesIterator<'a> {
+        PredicatesIterator::new(self.db, &self.tx)
+    }
+
+    pub fn rules(&'a self) -> RulesIterator<'a> {
+        RulesIterator::new(self.db, &self.tx)
+    }
+
+    pub fn commit(self) -> Result<(), errors::RecallError> {
+        self.tx.commit()?;
+        Ok(())
+    }
+
+    pub fn rollback(self) -> Result<(), errors::RecallError> {
+        self.tx.rollback()?;
+        Ok(())
+    }
+}
+
+impl<'a> Predicate<'a> {
+    pub fn assert(&self, tup: Vec<ParameterType>) -> Result<(), errors::RecallError> {
+        let data_cf = self.db.cf_handle("data").unwrap();
+        ParameterType::typecheck(&tup, &self.tup_scm)?;
+        let key = Tuple::encode(&tup, &self.tup_scm)?;
+        self.db.put_cf(data_cf, key.get(), b"")?;
+        Ok(())
+    }
+
+    pub fn retract(&self, tup: Vec<ParameterType>) -> Result<(), errors::RecallError> {
+        let data_cf = self.db.cf_handle("data").unwrap();
+        ParameterType::typecheck(&tup, &self.tup_scm)?;
+        let key = Tuple::encode(&tup, &self.tup_scm)?;
+        self.db.delete_cf(data_cf, key.get())?;
+        Ok(())
+    }
+}
+
+impl<'a> PredicatesIterator<'a> {
+    fn new(
+        db: &'a TransactionDB<SingleThreaded>,
+        tx: &'a rocksdb::Transaction<'a, TransactionDB<SingleThreaded>>,
+    ) -> Self {
+        let schema_cf = db.cf_handle("schema").unwrap();
+        let iter = tx.iterator_cf(schema_cf, IteratorMode::Start);
+
+        PredicatesIterator { db, tx, iter }
+    }
+}
+
+impl<'a> RulesIterator<'a> {
+    fn new(
+        db: &'a TransactionDB<SingleThreaded>,
+        tx: &'a rocksdb::Transaction<'a, TransactionDB<SingleThreaded>>,
+    ) -> Self {
+        let rules_cf = db.cf_handle("rules").unwrap();
+        let iter = tx.iterator_cf(rules_cf, IteratorMode::Start);
+
+        RulesIterator { iter }
+    }
+}
+
+impl<'a> Iterator for PredicatesIterator<'a> {
+    type Item = Predicate<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(tuple) = self.btree_iter.next() {
-            Some(tuple)
+        if let Some(result) = self.iter.next() {
+            let (raw_key, tup_scm) = result.unwrap();
+            let tup: Tuple = raw_key.into();
+            let key_scm = vec![format::ATOM_TYPE, format::INT_TYPE];
+            let key = tup.decode(&key_scm);
+            Some(Predicate {
+                db: self.db,
+                tx: self.tx,
+                name: key[0].get_atom().to_string(),
+                tup_scm: tup_scm.into_vec(),
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a> Iterator for RulesIterator<'a> {
+    type Item = String;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(result) = self.iter.next() {
+            let (raw_key, _) = result.unwrap();
+            let rule_text = String::from_utf8(raw_key.to_vec())
+                .expect("invalid rule text");
+            Some(rule_text)
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a> PredicateIntoIterator<'a> {
+    fn new(predicate: Predicate<'a>) -> Self {
+        let prefix = Tuple::encode(
+            &[ParameterType::Atom(predicate.name)],
+            &[format::ATOM_TYPE],
+        ).unwrap();
+
+        let data_cf = predicate.db.cf_handle("data").unwrap();
+
+        let mut read_opts = ReadOptions::default();
+        read_opts.set_iterate_range(PrefixRange(prefix.get()));
+
+        let iter = predicate.tx.iterator_cf_opt(
+            data_cf,
+            read_opts,
+            IteratorMode::Start,
+        );
+        PredicateIntoIterator { iter, tup_scm: predicate.tup_scm }
+    }
+}
+
+impl<'a> Iterator for PredicateIntoIterator<'a> {
+    type Item = Term;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(result) = self.iter.next() {
+            let (raw_key, _) = result.unwrap();
+            let tup: Tuple = raw_key.into();
+            let key = tup.decode(&self.tup_scm);
+            Some(key.into())
         } else {
             None
         }
@@ -284,6 +332,8 @@ mod tests {
     use super::*;
     use std::env;
     use std::fs;
+    use std::collections::HashSet;
+    use crate::errors::GenericError;
 
     struct Fixture {
         temp_path: std::path::PathBuf,
@@ -306,114 +356,153 @@ mod tests {
     }
 
     #[test]
-    fn it_can_define_predicates_and_use_them() {
-        let fixture = Fixture::new("it_can_define_predicates_and_use_them.db");
-        let mut db =
+    fn it_can_define_predicates() -> Result<(), GenericError> {
+        let fixture = Fixture::new("it_can_define_predicates.db");
+        let db =
             DB::new(&fixture.temp_path)
             .unwrap();
-
-        let catalog_objects =
-            BPlusTreeBuilder::new(Rc::clone(&db.pager), CATALOG_ROOT_PAGE_NUM)
-            .split_strategy_empty_page()
-            .build()
-            .into_iter()
-            .collect::<Vec<Vec<ParameterType>>>();
-        assert_eq!(catalog_objects.len(), 1);
-
+        let predicate_name = "foo";
+        let predicate_schema = vec![format::ATOM_TYPE, format::INT_TYPE];
+        let trx = db.begin_transaction();
         {
-            let pred_foo =
-                db
-                .define_predicate("foo", vec![format::ATOM_TYPE, format::INT_TYPE])
-                .unwrap();
-            let pred_bar =
-                db
-                .define_predicate("bar", vec![format::STRING_TYPE, format::INT_TYPE, format::UINT_TYPE])
-                .unwrap();
-
-            let predicates =
-                db
-                .get_predicates_object_btree()
-                .unwrap()
-                .into_iter()
-                .collect::<Vec<Vec<ParameterType>>>();
-            assert_eq!(predicates.len(), 2);
-
-            pred_foo.assert(&vec![
-                ParameterType::Atom("apple".to_string()),
-                ParameterType::Int(42),
-            ]).unwrap();
-            pred_foo.assert(&vec![
-                ParameterType::Atom("apple".to_string()),
-                ParameterType::Int(42),
-            ]).unwrap();
-            pred_foo.assert(&vec![
-                ParameterType::Atom("lemon".to_string()),
-                ParameterType::Int(1337),
-            ]).unwrap();
-
-            pred_bar.assert(&vec![
-                ParameterType::String("cake".to_string()),
-                ParameterType::Int(2001),
-                ParameterType::UInt(99),
-            ]).unwrap();
-            pred_bar.assert(&vec![
-                ParameterType::String("crepe".to_string()),
-                ParameterType::Int(99),
-                ParameterType::UInt(666),
-            ]).unwrap();
+            let _ = trx.define_predicate(predicate_name, predicate_schema.clone())?;
+            let predicate = trx.get_predicate(predicate_name, predicate_schema.len().try_into().unwrap())?;
+            assert_eq!(predicate.name, "foo");
+            assert_eq!(predicate.tup_scm, vec![format::ATOM_TYPE, format::ATOM_TYPE, format::INT_TYPE]);
         }
-
-        let pred =
-            db
-            .get_predicate("foo", 2)
-            .unwrap();
-        let got: Vec<Vec<ParameterType>> = pred.iter_owned().collect();
-        let want = vec![
-            vec![ParameterType::Atom("apple".to_string()), ParameterType::Int(42)],
-            vec![ParameterType::Atom("apple".to_string()), ParameterType::Int(42)],
-            vec![ParameterType::Atom("lemon".to_string()), ParameterType::Int(1337)],
-        ];
-        assert_eq!(got, want);
-
-        let pred =
-            db
-            .get_predicate("bar", 3)
-            .unwrap();
-        let got: Vec<Vec<ParameterType>> = pred.iter_owned().collect();
-        let want = vec![
-            vec![ParameterType::String("cake".to_string()), ParameterType::Int(2001), ParameterType::UInt(99)],
-            vec![ParameterType::String("crepe".to_string()), ParameterType::Int(99), ParameterType::UInt(666)],
-        ];
-        assert_eq!(got, want);
-
-        db.save();
-
-        let mut db =
-            DB::new(&fixture.temp_path)
-            .unwrap();
-        let pred =
-            db
-            .get_predicate("foo", 2)
-            .unwrap();
-
-        let got: Vec<Vec<ParameterType>> = pred.iter_owned().collect();
-        let want = vec![
-            vec![ParameterType::Atom("apple".to_string()), ParameterType::Int(42)],
-            vec![ParameterType::Atom("apple".to_string()), ParameterType::Int(42)],
-            vec![ParameterType::Atom("lemon".to_string()), ParameterType::Int(1337)],
-        ];
-        assert_eq!(got, want);
+        trx.commit()?;
+        Ok(())
     }
 
     #[test]
-    fn it_can_handle_duplicate_definitions() {
-        let fixture = Fixture::new("it_can_handle_duplicate_definitions.db");
-        let mut db =
+    fn it_can_assert_on_predicate() -> Result<(), GenericError> {
+        let fixture = Fixture::new("it_can_assert_on_predicate.db");
+        let db =
             DB::new(&fixture.temp_path)
             .unwrap();
 
-        assert!(db.define_predicate("foo", vec![format::ATOM_TYPE, format::INT_TYPE]).is_ok());
-        assert!(db.define_predicate("foo", vec![format::ATOM_TYPE, format::INT_TYPE]).is_ok());
-        assert!(db.define_predicate("foo", vec![format::ATOM_TYPE, format::STRING_TYPE]).is_err());
+        let trx = db.begin_transaction();
+        {
+            let predicate = trx.define_predicate("foo", vec![format::ATOM_TYPE, format::INT_TYPE])?;
+            predicate.assert(vec![
+                ParameterType::Atom("foo".to_string()),
+                ParameterType::Atom("apple".to_string()),
+                ParameterType::Int(42),
+            ])?;
+            predicate.assert(vec![
+                ParameterType::Atom("foo".to_string()),
+                ParameterType::Atom("apple".to_string()),
+                ParameterType::Int(42),
+            ])?;
+            predicate.assert(vec![
+                ParameterType::Atom("foo".to_string()),
+                ParameterType::Atom("lemon".to_string()),
+                ParameterType::Int(1337),
+            ])?;
+
+            let predicate = trx.define_predicate("bar", vec![format::STRING_TYPE, format::INT_TYPE])?;
+            predicate.assert(vec![
+                ParameterType::Atom("bar".to_string()),
+                ParameterType::Str("cake".to_string()),
+                ParameterType::Int(2001),
+            ])?;
+            predicate.assert(vec![
+                ParameterType::Atom("bar".to_string()),
+                ParameterType::Str("crepe".to_string()),
+                ParameterType::Int(99),
+            ])?;
+        }
+
+        assert_eq!(trx.predicates().collect::<Vec<Predicate<'_>>>().len(), 2);
+
+        let got: HashSet<Term>=
+            trx
+            .predicates()
+            .flat_map(|predicate| predicate.into_iter().collect::<Vec<Term>>())
+            .collect();
+
+        let want: HashSet<Term> =
+            HashSet::from_iter(vec![
+                Term::Functor("bar".to_string(), vec![Term::Str("cake".to_string()), Term::Integer(2001)]),
+                Term::Functor("bar".to_string(), vec![Term::Str("crepe".to_string()), Term::Integer(99)]),
+                Term::Functor("foo".to_string(), vec![Term::Atom("apple".to_string()), Term::Integer(42)]),
+                Term::Functor("foo".to_string(), vec![Term::Atom("lemon".to_string()), Term::Integer(1337)]),
+            ].into_iter());
+
+        assert_eq!(got, want);
+
+        trx.commit()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn it_can_retract_on_predicate() -> Result<(), GenericError> {
+        let fixture = Fixture::new("it_can_retract_on_predicate.db");
+        let db =
+            DB::new(&fixture.temp_path)
+            .unwrap();
+        let trx = db.begin_transaction();
+        {
+            let predicate = trx.define_predicate("foo", vec![format::ATOM_TYPE, format::INT_TYPE])?;
+
+            predicate.assert(vec![
+                ParameterType::Atom("foo".to_string()),
+                ParameterType::Atom("apple".to_string()),
+                ParameterType::Int(42),
+            ])?;
+            predicate.assert(vec![
+                ParameterType::Atom("foo".to_string()),
+                ParameterType::Atom("lemon".to_string()),
+                ParameterType::Int(1337),
+            ])?;
+
+            let got =
+                predicate
+                .into_iter()
+                .collect::<Vec<Term>>();
+
+            assert_eq!(got, vec![
+                Term::Functor("foo".to_string(), vec![Term::Atom("apple".to_string()), Term::Integer(42)]),
+                Term::Functor("foo".to_string(), vec![Term::Atom("lemon".to_string()), Term::Integer(1337)]),
+            ]);
+        }
+
+        {
+            let predicate = trx.get_predicate("foo", 2)?;
+
+            predicate.retract(vec![
+                ParameterType::Atom("foo".to_string()),
+                ParameterType::Atom("lemon".to_string()),
+                ParameterType::Int(1337),
+            ])?;
+
+            let got =
+                predicate
+                .into_iter()
+                .collect::<Vec<Term>>();
+
+            assert_eq!(got, vec![
+                Term::Functor("foo".to_string(), vec![Term::Atom("apple".to_string()), Term::Integer(42)]),
+            ]);
+        }
+
+        trx.commit()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn it_can_handle_duplicate_definitions() -> Result<(), GenericError> {
+        let fixture = Fixture::new("it_can_handle_duplicate_definitions.db");
+        let db =
+            DB::new(&fixture.temp_path)
+            .unwrap();
+        let trx = db.begin_transaction();
+        assert!(trx.define_predicate("foo", vec![format::ATOM_TYPE, format::INT_TYPE]).is_ok());
+        assert!(trx.define_predicate("foo", vec![format::ATOM_TYPE, format::INT_TYPE]).is_ok());
+        assert!(trx.define_predicate("foo", vec![format::ATOM_TYPE, format::STRING_TYPE]).is_err());
+        trx.commit()?;
+        Ok(())
     }
 }

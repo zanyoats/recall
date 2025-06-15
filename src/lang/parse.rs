@@ -1,5 +1,3 @@
-use std::fmt;
-
 use crate::lang::scan::Scanner;
 use crate::lang::scan::Token;
 use crate::errors::RecallError;
@@ -66,33 +64,6 @@ pub enum Term {
     Functor(String, Vec<Term>),
 }
 
-impl fmt::Display for Term {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Term::Atom(value) => write!(f, "{}", value),
-            Term::Str(value) => write!(f, "\"{}\"", value),
-            Term::Var(value) => write!(f, "{}", value),
-            Term::Integer(value) => write!(f, "{}", value),
-            Term::Functor(name, terms) => {
-                write!(f, "{}", name)?;
-                if terms.len() > 0 {
-                    write!(f, "(")?;
-
-                    let formatted: Vec<String> = terms
-                        .iter()
-                        .map(|term| format!("{}", term))
-                        .collect();
-
-                    write!(f, "{}", formatted.join(", "))?;
-
-                    write!(f, ")")?;
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
 pub struct Parser<'a> {
     scanner: Scanner<'a>,
 }
@@ -101,6 +72,15 @@ impl<'a> Parser<'a> {
     pub fn new(scanner: Scanner<'a>) -> Self {
         Parser { scanner }
     }
+}
+
+/// Used to parse rules stored (as text) in db into Literal
+pub fn parse_rule<'a>(mut parser: Parser) -> Result<Literal, RecallError> {
+    let head = parse_literal(&mut parser)?;
+    expect_token(&mut parser, Token::If)?;
+    let body = parse_body(&mut parser)?;
+    expect_token(&mut parser, Token::Assertion)?;
+    Ok(Literal { head, body })
 }
 
 /// EBNF Grammar for Datalog

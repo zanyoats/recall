@@ -3,24 +3,32 @@ use std::ops::DerefMut;
 
 use crate::errors;
 
-use super::sizedbuf::SizedBuf;
-use crate::storage::engine::btree::format::ATOM_TYPE;
-use crate::storage::engine::btree::format::STRING_TYPE;
-use crate::storage::engine::btree::format::UINT_TYPE;
-use crate::storage::engine::btree::format::INT_TYPE;
-use crate::storage::engine::btree::format::BYTES_TYPE;
+use crate::storage::sizedbuf::SizedBuf;
+use crate::storage::format::ATOM_TYPE;
+use crate::storage::format::STRING_TYPE;
+use crate::storage::format::INT_TYPE;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Tuple {
     buf: SizedBuf,
 }
 
+impl From<Vec<u8>> for Tuple {
+    fn from(data: Vec<u8>) -> Self {
+        Tuple { buf: data.into() }
+    }
+}
+
+impl From<Box<[u8]>> for Tuple {
+    fn from(b: Box<[u8]>) -> Self {
+        Tuple { buf: Vec::from(b).into() }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ParameterType {
     Atom(String),
-    String(String),
-    Bytes(Vec<u8>),
-    UInt(u32),
+    Str(String),
     Int(i32),
 }
 
@@ -28,9 +36,7 @@ impl ParameterType {
     pub fn storage_size(&self) -> usize{
         match self {
             ParameterType::Atom(val) => SizedBuf::atom_storage_size(val.len()),
-            ParameterType::String(val) => SizedBuf::string_storage_size(val.len()),
-            ParameterType::Bytes(val) => SizedBuf::bytes_storage_size(val.len()),
-            ParameterType::UInt(_) => SizedBuf::uint_storage_size(),
+            ParameterType::Str(val) => SizedBuf::string_storage_size(val.len()),
             ParameterType::Int(_) => SizedBuf::int_storage_size(),
         }
     }
@@ -44,26 +50,10 @@ impl ParameterType {
     }
 
     pub fn get_string(&self) -> &str {
-        if let Self::String(val) = self {
+        if let Self::Str(val) = self {
             val
         } else {
             panic!("expected underlying to be a string")
-        }
-    }
-
-    pub fn get_bytes(&self) -> &[u8] {
-        if let Self::Bytes(val) = self {
-            val
-        } else {
-            panic!("expected underlying to be bytes")
-        }
-    }
-
-    pub fn get_uint(&self) -> u32 {
-        if let Self::UInt(val) = self {
-            *val
-        } else {
-            panic!("expected underlying to be an uint")
         }
     }
 
@@ -90,22 +80,10 @@ impl ParameterType {
                     return Err(errors::RecallError::TypeError(format!("expected tuple position {i} to be typed as atom")))
                 }
                 STRING_TYPE => {
-                    if let ParameterType::String(_) = elem {
+                    if let ParameterType::Str(_) = elem {
                         continue
                     }
                     return Err(errors::RecallError::TypeError(format!("expected tuple position {i} to be typed as string")))
-                }
-                BYTES_TYPE => {
-                    if let ParameterType::Bytes(_) = elem {
-                        continue
-                    }
-                    return Err(errors::RecallError::TypeError(format!("expected tuple position {i} to be typed as bytes")))
-                }
-                UINT_TYPE => {
-                    if let ParameterType::UInt(_) = elem {
-                        continue
-                    }
-                    return Err(errors::RecallError::TypeError(format!("expected tuple position {i} to be typed as uint")))
                 }
                 INT_TYPE => {
                     if let ParameterType::Int(_) = elem {
@@ -165,24 +143,10 @@ impl Tuple {
                     }
                 }
                 STRING_TYPE => {
-                    if let ParameterType::String(val) = param_type {
+                    if let ParameterType::Str(val) = param_type {
                         offset = tuple.buf.write_string_offset(offset, &val);
                     } else {
                         return Err(errors::RecallError::TypeError(format!("predicate tuple position {} expected type string", i)));
-                    }
-                }
-                BYTES_TYPE => {
-                    if let ParameterType::Bytes(val) = param_type {
-                        offset = tuple.buf.write_bytes_offset(offset, &val);
-                    } else {
-                        return Err(errors::RecallError::TypeError(format!("predicate tuple position {} expected type bytes", i)));
-                    }
-                }
-                UINT_TYPE => {
-                    if let ParameterType::UInt(val) = param_type {
-                        offset = tuple.buf.write_u32_offset(offset, *val);
-                    } else {
-                        return Err(errors::RecallError::TypeError(format!("predicate tuple position {} expected type unsigned int", i)));
                     }
                 }
                 INT_TYPE => {
@@ -212,17 +176,7 @@ impl Tuple {
                 }
                 STRING_TYPE => {
                     let (offset1, val) = self.buf.read_string_offset(offset);
-                    result.push(ParameterType::String(val));
-                    offset = offset1;
-                }
-                BYTES_TYPE => {
-                    let (offset1, val) = self.buf.read_bytes_offset(offset);
-                    result.push(ParameterType::Bytes(val));
-                    offset = offset1;
-                }
-                UINT_TYPE => {
-                    let (offset1, val) = self.buf.read_u32_offset(offset);
-                    result.push(ParameterType::UInt(val));
+                    result.push(ParameterType::Str(val));
                     offset = offset1;
                 }
                 INT_TYPE => {
@@ -249,26 +203,26 @@ mod tests {
         let insert_key = 42;
         let mut size = 0;
 
-        // tuple schema: (Id: uint, Note: string, N: int, Atom: atom, Buf: bytes)
+        // tuple schema: (Id: int, Note: string, N: int, Atom: atom, Buf: string)
         let id = insert_key + 1000;
-        size += SizedBuf::uint_storage_size();
+        size += SizedBuf::int_storage_size();
         let note = format!("My key is {}", insert_key);
         size += SizedBuf::string_storage_size(note.len());
         let n = -42;
         size += SizedBuf::int_storage_size();
         let atom = "foo";
         size += SizedBuf::atom_storage_size(atom.len());
-        let buf = b"hello, world";
-        size += SizedBuf::bytes_storage_size(buf.len());
+        let buf = "hello, world";
+        size += SizedBuf::string_storage_size(buf.len());
 
         let mut tuple = Tuple::new(size);
-        let offset = tuple.write_u32_offset(0, id);
+        let offset = tuple.write_i32_offset(0, id);
         let offset = tuple.write_string_offset(offset, &note);
         let offset = tuple.write_i32_offset(offset, n);
         let offset = tuple.write_atom_offset(offset, &atom);
-        tuple.write_bytes_offset(offset, buf);
+        tuple.write_string_offset(offset, buf);
 
-        let (offset, val) = tuple.read_u32_offset(0);
+        let (offset, val) = tuple.read_i32_offset(0);
         assert_eq!(val, id);
         let (offset, val) = tuple.read_string_offset(offset);
         assert_eq!(val, note);
@@ -276,7 +230,7 @@ mod tests {
         assert_eq!(val, n);
         let (offset, val) = tuple.read_atom_offset(offset);
         assert_eq!(val, atom);
-        let (_, val) = tuple.read_bytes_offset(offset);
-        assert_eq!(val, buf.to_vec());
+        let (_, val) = tuple.read_string_offset(offset);
+        assert_eq!(val, buf);
     }
 }
