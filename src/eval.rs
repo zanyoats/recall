@@ -14,7 +14,11 @@ use crate::lang::unify;
 use crate::storage::db;
 use crate::storage::format;
 use crate::storage::tuple::ParameterType;
-use crate::QueryEvaluator;
+
+pub trait QueryEvaluator<'a> {
+    type Iter: Iterator<Item = parse::Predicate> + Default;
+    fn evaluate(&self, query: parse::Predicate, txn: &'a db::TransactionOp) -> Result<Self::Iter, errors::RecallError>;
+}
 
 pub fn iter_eval<'a, Engine: QueryEvaluator<'a>>(
     program: Program,

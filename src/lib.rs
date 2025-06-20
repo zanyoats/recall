@@ -220,7 +220,15 @@ impl Display for Literal {
     }
 }
 
-pub trait QueryEvaluator<'a> {
-    type Iter: Iterator<Item = lang::parse::Predicate> + Default;
-    fn evaluate(&self, query: lang::parse::Predicate, txn: &'a storage::db::TransactionOp) -> Result<Self::Iter, errors::RecallError>;
+// app-wide config
+static mut VERBOSE: bool = false;
+
+pub fn set_verbose() {
+    unsafe {
+        VERBOSE = true;
+    }
+}
+
+pub fn get_verbose() -> bool {
+    unsafe { VERBOSE }
 }

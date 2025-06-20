@@ -1,5 +1,13 @@
 # recall
 
+## install
+
+```
+cargo install --path . # install to default path
+```
+
+## overview
+
 a proof of concept datalog engine using rocksdb.
 
 ```sh

@@ -10,7 +10,7 @@ use crate::lang::unify::Bindings;
 use crate::lang::unify::unify;
 use crate::lang::unify::unify_with_bindings;
 use crate::lang::unify::substitute_bindings;
-use crate::QueryEvaluator;
+use crate::eval::QueryEvaluator;
 use crate::storage::db;
 use crate::errors;
 
@@ -25,18 +25,33 @@ fn eval_query(
     rules: Vec<Literal>,
     facts: Vec<Predicate>,
 ) -> NaiveResultIter {
+    let mut k = 0;
+
+    if crate::get_verbose() {
+        eprintln!("INFO: Generation {}", k);
+    }
     let mut learned= HashSet::from_iter(
         facts
         .into_iter()
+        .map(|fact| {
+            if crate::get_verbose() {
+                eprintln!("INFO: {} (new)", fact);
+            }
+            fact
+        })
     );
 
     // iterate until fixpoint: condition when no new facts are learnt
-    let mut _k = 0;
-    while !can_halt_iterations(&rules, &mut learned) {
-        _k += 1;
-    }
+    loop {
+        k += 1;
+        if can_halt_iterations(&rules, &mut learned, k) {
+            break;
+        }
+    };
 
-    // eprintln!("DEBUG: completed in {} iterations", k);
+    if crate::get_verbose() {
+        eprintln!("INFO: completed in {} generations", k);
+    }
 
     NaiveResultIter {
         iter:
@@ -97,7 +112,11 @@ impl Iterator for NaiveResultIter {
     }
 }
 
-fn can_halt_iterations<'a>(rules: &'a [Literal], learned: &'a mut HashSet<Predicate>) -> bool {
+fn can_halt_iterations<'a>(rules: &'a [Literal], learned: &'a mut HashSet<Predicate>, k: i32) -> bool {
+    if crate::get_verbose() {
+        eprintln!("INFO: Generation {}", k);
+    }
+
     let deduced: Vec<Predicate> =
         rules
         .iter()
@@ -115,7 +134,17 @@ fn can_halt_iterations<'a>(rules: &'a [Literal], learned: &'a mut HashSet<Predic
         deduced
         .into_iter()
         .map(|predicate| {
-            learned.insert(predicate) == false
+            if learned.insert(predicate.clone()) {
+                if crate::get_verbose() {
+                    eprintln!("INFO: {} (new)", predicate);
+                }
+                false
+            } else {
+                if crate::get_verbose() {
+                    eprintln!("INFO: {}", predicate);
+                }
+                true
+            }
         })
         .collect::<Vec<bool>>()
         .into_iter()

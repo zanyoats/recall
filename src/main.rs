@@ -21,6 +21,7 @@ use recall::errors;
 struct Config {
     name: String,
     h: bool,
+    v: bool,
     program: String,
     db: Option<PathBuf>,
 }
@@ -43,13 +44,16 @@ fn parse_config(mut iter: impl Iterator<Item = String>) -> Result<Config, errors
         .unwrap();
 
     let mut result = Config {
-        name, h: false, program: String::new(), db: None,
+        name, h: false, v: false, program: String::new(), db: None,
     };
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "-h" => {
                 result.h = true;
+            },
+            "-v" => {
+                result.v = true;
             },
             "-f" => {
                 if let Some(path) = iter.next() {
@@ -94,6 +98,10 @@ fn run(cfg: Config) -> Result<(), errors::RecallError> {
     if cfg.h {
         println!("{}", help(&cfg.name));
         return Ok(())
+    }
+
+    if cfg.v {
+        recall::set_verbose();
     }
 
     let db = if let Some(file_path) = cfg.db {
@@ -278,6 +286,7 @@ fn help(program: &str) -> String {
     result.push('\n');
     result.push_str("Options:\n");
     result.push_str("-h:            help\n");
+    result.push_str("-v:            verbose, show the derivations for each iteration\n");
     result.push_str("-f file:       read in datalog program from file\n");
     result.push_str("-s '...':      read in datalog program from string\n");
     result.push('\n');
