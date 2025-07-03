@@ -3,6 +3,8 @@ use std::iter::Peekable;
 use std::str::Chars;
 use std::fmt;
 
+use anyhow::Context;
+
 use crate::errors;
 
 #[derive(Debug)]
@@ -69,7 +71,7 @@ impl fmt::Display for Token {
             Var(_)      => write!(f, "var"),
             Integer(_)  => write!(f, "integer"),
             /* punctuation */
-            Decl        => write!(f, "%!"),
+            Decl        => write!(f, "#!"),
             Assertion   => write!(f, "."),
             Retraction  => write!(f, "!"),
             Query       => write!(f, "?"),
@@ -95,7 +97,7 @@ impl<'a> Scanner<'a> {
         Scanner { iterable: input.chars().peekable(), buf: None }
     }
 
-    pub fn peek_token(&mut self) -> Result<&Token, errors::RecallError> {
+    pub fn peek_token(&mut self) -> Result<&Token, anyhow::Error> {
         if self.buf.is_none() {
             self.buf = Some(self.advance()?);
         }
@@ -103,7 +105,7 @@ impl<'a> Scanner<'a> {
         Ok(self.buf.as_ref().unwrap())
     }
 
-    pub fn next_token(&mut self) -> Result<Token, errors::RecallError> {
+    pub fn next_token(&mut self) -> Result<Token, anyhow::Error> {
         if let Some(token) = self.buf.take() {
             Ok(token)
         } else {
@@ -111,9 +113,9 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    fn advance(&mut self) -> Result<Token, errors::RecallError> {
+    fn advance(&mut self) -> Result<Token, anyhow::Error> {
         use Token::*;
-        use errors::RecallError::{ScanError, ScanErrorUnderlying};
+        use errors::RecallError::{ScanError};
 
         while let Some(ch) = self.iterable.next() {
             match ch {
@@ -134,10 +136,10 @@ impl<'a> Scanner<'a> {
                     } else {
                         return Err(ScanError(format!(
                             "unrecognized charater '{}' following colon '{}'", ch, ":",
-                        )))
+                        )).into())
                     }
                 },
-                '%' => {
+                '#' => {
                     if let Some('!') = self.iterable.peek() {
                         self.iterable.next();
                         return Ok(Decl)
@@ -163,13 +165,13 @@ impl<'a> Scanner<'a> {
                 }
                 /* start if number */
                 '0'..='9' => {
-                    let n = iter::once(ch)
+                    let n_str = iter::once(ch)
                         .chain(iter::from_fn(|| self.iterable.next_if(|s| s.is_ascii_digit())))
-                        .collect::<String>()
+                        .collect::<String>();
+                    let n = n_str
+                        .as_str()
                         .parse::<i32>()
-                        .map_err(|underlying| {
-                            ScanErrorUnderlying(Box::new(underlying))
-                        })?;
+                        .with_context(|| format!("error while parsing {}", n_str))?;
                     return Ok(Integer(n))
                 }
                 /* start of string */
@@ -199,13 +201,13 @@ impl<'a> Scanner<'a> {
                     } else {
                         return Err(ScanError(format!(
                             "no closing quote found when parsing string",
-                        )))
+                        )).into())
                     }
                 }
                 /* unregonized case */
                 _ => return Err(ScanError(format!(
                     "unrecognized character '{}'", ch,
-                )))
+                )).into())
             }
         }
         return Ok(End)

@@ -1,3 +1,6 @@
+// TODO: drop fact from schema cf (also drops any rows in data cf too)
+// TODO: inlcude builtin predicates: == != < <= > >=
+
 use std::fmt;
 use std::fmt::Display;
 use std::fmt::Formatter;
@@ -6,168 +9,56 @@ pub mod lang;
 pub mod storage;
 pub mod eval;
 pub mod errors {
-    use std::fmt;
-    use std::error::Error;
+    use thiserror::Error;
 
-    pub type GenericError = Box<dyn Error + Send + Sync + 'static>;
-
-    #[derive(Debug)]
+    #[derive(Debug, Error)]
     pub enum RecallError {
-        CLIError(String),
+        #[error("type error: {0}")]
         TypeError(String),
-        UniqueKeyError,
-        PredicateNotFound(String, i32),
-        ReplaceKeyNotFound,
+
+        #[error("runtime error: {0}")]
+        RuntimeError(String),
+
+        #[error("syntax error: {0}")]
         ParseError(String),
+
+        #[error("syntax error: {0}")]
         ScanError(String),
-        ScanErrorUnderlying(Box<dyn Error + Send + Sync + 'static>),
-        RocksDB(Box<rocksdb::Error>),
-        Readline(Box<rustyline::error::ReadlineError>),
-        IOError(Box<std::io::Error>),
+
+        #[error("error found in rocksdb: {0}")]
+        RocksDB(#[from] rocksdb::Error),
+
+        #[error("error found in os input/output: {0}")]
+        IOError(#[from] std::io::Error),
     }
-
-
-    impl From<rocksdb::Error> for RecallError {
-        fn from(e: rocksdb::Error) -> RecallError {
-            RecallError::RocksDB(Box::new(e))
-        }
-    }
-
-    impl From<rustyline::error::ReadlineError> for RecallError {
-        fn from(e: rustyline::error::ReadlineError) -> RecallError {
-            RecallError::Readline(Box::new(e))
-        }
-    }
-
-    impl From<std::io::Error> for RecallError {
-        fn from(e: std::io::Error) -> RecallError {
-            RecallError::IOError(Box::new(e))
-        }
-    }
-
-    impl fmt::Display for RecallError {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            use RecallError::*;
-
-            match self {
-                ParseError(s) | ScanError(s) => write!(f, "syntax error: {}", s),
-                TypeError(s) => write!(f, "type error: {}", s),
-                ScanErrorUnderlying(err) => {
-                    writeln!(f, "error found during parsing: {}", err)?;
-
-                    // Walk the chain of error sources
-                    let mut source = err.source();
-                    while let Some(inner) = source {
-                        writeln!(f, "caused by: {}", inner)?;
-                        source = inner.source();
-                    }
-                    Ok(())
-                },
-                RocksDB(err) => {
-                    writeln!(f, "error found in rocksdb: {}", err)?;
-
-                    // Walk the chain of error sources
-                    let mut source = err.source();
-                    while let Some(inner) = source {
-                        writeln!(f, "caused by: {}", inner)?;
-                        source = inner.source();
-                    }
-                    Ok(())
-                },
-                Readline(err) => {
-                    writeln!(f, "error found in readline: {}", err)?;
-
-                    // Walk the chain of error sources
-                    let mut source = err.source();
-                    while let Some(inner) = source {
-                        writeln!(f, "caused by: {}", inner)?;
-                        source = inner.source();
-                    }
-                    Ok(())
-                },
-                IOError(err) => {
-                    writeln!(f, "error found in os input/output: {}", err)?;
-
-                    // Walk the chain of error sources
-                    let mut source = err.source();
-                    while let Some(inner) = source {
-                        writeln!(f, "caused by: {}", inner)?;
-                        source = inner.source();
-                    }
-                    Ok(())
-                },
-                UniqueKeyError => write!(f, "unqiue key violation"),
-                ReplaceKeyNotFound => write!(f, "replace key not found violation"),
-                PredicateNotFound(name, arity) => write!(f, "predicate not found: {}/{}", name, arity),
-                CLIError(s) => write!(f, "{}", s),
-            }
-        }
-    }
-
-    impl Error for RecallError {}
 }
 
 use storage::tuple::ParameterType;
 use lang::parse::Term;
 use lang::parse::Literal;
 
-/*
-    Convert from Paramter Type -> Term
-*/
 impl From<ParameterType> for Term {
     fn from(p: ParameterType) -> Term {
         match p {
             ParameterType::Atom(s) => Term::Atom(s),
             ParameterType::Str(s) => Term::Str(s),
             ParameterType::Int(i) => Term::Integer(i),
+            _ => unreachable!(),
         }
     }
 }
 
-impl From<Vec<ParameterType>> for Term {
-    fn from(mut params: Vec<ParameterType>) -> Term {
-        // pull off the first element as the functor name
-        let name = match params
-            .drain(..1)
-            .next()
-            .unwrap() {
-            ParameterType::Atom(s) => s,
-            _ => unreachable!(),
-        };
-
-        // convert the rest into Terms
-        let args: Vec<Term> = params
-            .into_iter()
-            .map(Term::from)
-            .collect();
-
-        Term::Functor(name, args)
-    }
-}
-
-/*
-    Convert from Term -> Paramter Type
-*/
-impl From<Term> for Vec<ParameterType> {
-    fn from(t: Term) -> Vec<ParameterType> {
+impl From<&Term> for ParameterType {
+    fn from(t: &Term) -> Self {
         match t {
-            Term::Atom(s) => vec![ParameterType::Atom(s)],
-            Term::Str(s) => vec![ParameterType::Str(s)],
-            Term::Integer(i) => vec![ParameterType::Int(i)],
-            Term::Functor(name, args) => {
-                let mut result = vec![ParameterType::Atom(name)];
-                for arg in args {
-                    let arg: Vec<ParameterType> = arg.into();
-                    result.extend(arg.into_iter());
-                }
-                result
-            },
+            Term::Atom(s) => ParameterType::Atom(s.to_string()),
+            Term::Str(s) => ParameterType::Str(s.to_string()),
+            Term::Integer(i) => ParameterType::Int(*i),
             _ => unreachable!(),
         }
     }
 }
 
-// Literal, Term to string
 impl fmt::Display for Term {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -220,7 +111,7 @@ impl Display for Literal {
     }
 }
 
-// app-wide config
+/// app-wide config
 static mut VERBOSE: bool = false;
 
 pub fn set_verbose() {

@@ -4,9 +4,7 @@ use std::ops::DerefMut;
 use crate::errors;
 
 use crate::storage::sizedbuf::SizedBuf;
-use crate::storage::format::ATOM_TYPE;
-use crate::storage::format::STRING_TYPE;
-use crate::storage::format::INT_TYPE;
+use crate::storage::format;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Tuple {
@@ -30,6 +28,10 @@ pub enum ParameterType {
     Atom(String),
     Str(String),
     Int(i32),
+    // following are used only internally
+    U8(u8),
+    U16(u16),
+    U32(u32),
 }
 
 impl ParameterType {
@@ -38,66 +40,40 @@ impl ParameterType {
             ParameterType::Atom(val) => SizedBuf::atom_storage_size(val.len()),
             ParameterType::Str(val) => SizedBuf::string_storage_size(val.len()),
             ParameterType::Int(_) => SizedBuf::int_storage_size(),
+            ParameterType::U8(_) => format::BYTE_SIZE,
+            ParameterType::U16(_) => format::U16_SIZE,
+            ParameterType::U32(_) => format::U32_SIZE,
         }
     }
 
     pub fn get_atom(&self) -> &str {
-        if let Self::Atom(val) = self {
-            val
-        } else {
-            panic!("expected underlying to be an atom")
-        }
+        if let Self::Atom(val) = self { val }
+        else { unreachable!() }
     }
 
     pub fn get_string(&self) -> &str {
-        if let Self::Str(val) = self {
-            val
-        } else {
-            panic!("expected underlying to be a string")
-        }
+        if let Self::Str(val) = self { val }
+        else { unreachable!() }
     }
 
     pub fn get_int(&self) -> i32 {
-        if let Self::Int(val) = self {
-            *val
-        } else {
-            panic!("expected underlying to be an int")
-        }
+        if let Self::Int(val) = self { *val }
+        else { unreachable!() }
     }
 
-    pub fn typecheck(val: &Vec<Self>, schema: &[u8]) -> Result<(), errors::RecallError> {
-        if val.len() != schema.len() {
-            return Err(errors::RecallError::TypeError(format!("wanted arity of {} got {}", schema.len(), val.len())))
-        }
+    pub fn get_u8(&self) -> u8 {
+        if let Self::U8(val) = self { *val }
+        else { unreachable!() }
+    }
 
-        for (i, elem) in val.iter().enumerate() {
-            let elem_type = &schema[i];
-            match *elem_type {
-                ATOM_TYPE => {
-                    if let ParameterType::Atom(_) = elem {
-                        continue
-                    }
-                    return Err(errors::RecallError::TypeError(format!("expected tuple position {i} to be typed as atom")))
-                }
-                STRING_TYPE => {
-                    if let ParameterType::Str(_) = elem {
-                        continue
-                    }
-                    return Err(errors::RecallError::TypeError(format!("expected tuple position {i} to be typed as string")))
-                }
-                INT_TYPE => {
-                    if let ParameterType::Int(_) = elem {
-                        continue
-                    }
-                    return Err(errors::RecallError::TypeError(format!("expected tuple position {i} to be typed as int")))
-                }
-                type_spec => {
-                    assert!(false, "invalid type specifier stored {:?}", type_spec)
-                }
-            }
-        }
+    pub fn get_u16(&self) -> u16 {
+        if let Self::U16(val) = self { *val }
+        else { unreachable!() }
+    }
 
-        Ok(())
+    pub fn get_u32(&self) -> u32 {
+        if let Self::U32(val) = self { *val }
+        else { unreachable!() }
     }
 }
 
@@ -122,7 +98,7 @@ impl Tuple {
         Tuple { buf }
     }
 
-    pub fn encode(input: &[ParameterType], parameters: &[u8]) -> Result<Self, errors::RecallError> {
+    pub fn encode(input: &[ParameterType], scm: &[u8]) -> Result<Self, anyhow::Error> {
         let storage_size =
             input
             .iter()
@@ -131,62 +107,100 @@ impl Tuple {
             });
         let mut tuple = Tuple::new(storage_size);
         let mut offset = 0;
-        for (i, parameter) in parameters.iter().enumerate() {
+        for (i, parameter) in scm.iter().enumerate() {
             let param_type = &input[i];
 
             match *parameter {
-                ATOM_TYPE => {
+                format::ATOM_TYPE => {
                     if let ParameterType::Atom(val) = param_type {
                         offset = tuple.buf.write_atom_offset(offset, &val);
                     } else {
-                        return Err(errors::RecallError::TypeError(format!("predicate tuple position {} expected type atom", i)));
+                        return Err(errors::RecallError::RuntimeError(
+                            format!("predicate tuple position {} expected type atom", i)
+                        ).into());
                     }
-                }
-                STRING_TYPE => {
+                },
+                format::STRING_TYPE => {
                     if let ParameterType::Str(val) = param_type {
                         offset = tuple.buf.write_string_offset(offset, &val);
                     } else {
-                        return Err(errors::RecallError::TypeError(format!("predicate tuple position {} expected type string", i)));
+                        return Err(errors::RecallError::RuntimeError(
+                            format!("predicate tuple position {} expected type string", i)
+                        ).into());
                     }
-                }
-                INT_TYPE => {
+                },
+                format::INT_TYPE => {
                     if let ParameterType::Int(val) = param_type {
                         offset = tuple.buf.write_i32_offset(offset, *val);
                     } else {
-                        return Err(errors::RecallError::TypeError(format!("predicate tuple position {} expected type int", i)));
+                        return Err(errors::RecallError::RuntimeError(
+                            format!("predicate tuple position {} expected type int", i)
+                        ).into());
                     }
-                }
-                _ => {
-                    assert!(false, "parameter type is invalid");
-                }
+                },
+                format::U8_TYPE => {
+                    if let ParameterType::U8(val) = param_type {
+                        offset = tuple.buf.write_u8_offset(offset, *val);
+                    } else {
+                        unreachable!()
+                    }
+                },
+                format::U16_TYPE => {
+                    if let ParameterType::U16(val) = param_type {
+                        offset = tuple.buf.write_u16_offset(offset, *val);
+                    } else {
+                        unreachable!()
+                    }
+                },
+                format::U32_TYPE => {
+                    if let ParameterType::U32(val) = param_type {
+                        offset = tuple.buf.write_u32_offset(offset, *val);
+                    } else {
+                        unreachable!()
+                    }
+                },
+                _ => unreachable!(),
             }
         }
         Ok(tuple)
     }
 
-    pub fn decode(&self, parameters: &[u8]) -> Vec<ParameterType> {
+    pub fn decode(&self, scm: &[u8]) -> Vec<ParameterType> {
         let mut result = vec![];
         let mut offset: usize = 0;
-        for parameter in parameters.iter() {
+        for parameter in scm.iter() {
             match *parameter {
-                ATOM_TYPE => {
+                format::ATOM_TYPE => {
                     let (offset1, val) = self.buf.read_atom_offset(offset);
                     result.push(ParameterType::Atom(val));
                     offset = offset1;
-                }
-                STRING_TYPE => {
+                },
+                format::STRING_TYPE => {
                     let (offset1, val) = self.buf.read_string_offset(offset);
                     result.push(ParameterType::Str(val));
                     offset = offset1;
-                }
-                INT_TYPE => {
+                },
+                format::INT_TYPE => {
                     let (offset1, val) = self.buf.read_i32_offset(offset);
                     result.push(ParameterType::Int(val));
                     offset = offset1;
-                }
-                _ => {
-                    assert!(false, "parameter type is invalid");
-                }
+                },
+                format::U8_TYPE => {
+                    let (offset1, val) = self.buf.read_u8_offset(offset);
+                    result.push(ParameterType::U8(val));
+                    offset = offset1;
+                },
+                format::U16_TYPE => {
+                    let (offset1, val) = self.buf.read_u16_offset(offset);
+                    result.push(ParameterType::U16(val));
+                    offset = offset1;
+                },
+                format::U32_TYPE => {
+                    let (offset1, val) = self.buf.read_u32_offset(offset);
+                    result.push(ParameterType::U32(val));
+                    offset = offset1;
+                },
+                _ => unreachable!(),
             }
         }
         result

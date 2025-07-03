@@ -3,6 +3,7 @@ use std::env;
 use std::path::PathBuf;
 use std::io::{stdout, Write};
 
+use anyhow::{Context, bail};
 use rustyline::error::ReadlineError;
 use rustyline::{DefaultEditor};
 use crossterm::{
@@ -12,16 +13,19 @@ use crossterm::{
 
 use recall::lang::scan::Scanner;
 use recall::lang::parse::Parser;
+use recall::lang::parse::TypedProgram;
 use recall::lang::parse::parse_program;
+use recall::lang::analysis;
 use recall::eval;
 use recall::storage::db::DB;
-use recall::errors;
 
 #[derive(Debug)]
 struct Config {
     name: String,
     h: bool,
     v: bool,
+    c: bool,
+    i: bool,
     program: String,
     db: Option<PathBuf>,
 }
@@ -32,19 +36,19 @@ fn main() {
         .and_then(run);
 
     if let Err(err) = result {
-        eprintln!("{}", err);
+        eprintln!("{:#}", err);
         std::process::exit(1);
     }
 }
 
-fn parse_config(mut iter: impl Iterator<Item = String>) -> Result<Config, errors::RecallError> {
+fn parse_config(mut iter: impl Iterator<Item = String>) -> Result<Config, anyhow::Error> {
     let name =
         iter
         .next()
         .unwrap();
 
     let mut result = Config {
-        name, h: false, v: false, program: String::new(), db: None,
+        name, h: false, c: false, v: false, i: false, program: String::new(), db: None,
     };
 
     while let Some(arg) = iter.next() {
@@ -55,37 +59,37 @@ fn parse_config(mut iter: impl Iterator<Item = String>) -> Result<Config, errors
             "-v" => {
                 result.v = true;
             },
+            "-c" => {
+                result.c = true;
+            },
+            "-i" => {
+                result.i = true;
+            },
             "-f" => {
                 if let Some(path) = iter.next() {
-                    let s = fs::read_to_string(path).unwrap();
+                    let s = fs::read_to_string(&path)
+                        .with_context(|| format!("failed to read {}", path))?;
+
                     result.program.push_str(&s);
                 } else {
-                    return Err(errors::RecallError::CLIError(format!(
-                        "expected program text file after '-f'",
-                    )))
+                    bail!("expected program text file after '-f'");
                 }
             },
             "-s" => {
                 if let Some(s) = iter.next() {
                     result.program.push_str(&s);
                 } else {
-                    return Err(errors::RecallError::CLIError(format!(
-                        "expected program snippet after '-s'",
-                    )))
+                    bail!("expected program snippet after '-s'")
                 }
             },
             other if other.starts_with('-') => {
-                return Err(errors::RecallError::CLIError(format!(
-                    "unknown flag '{}'", other,
-                )))
+                bail!("unknown flag '{}'", other)
             },
             positional => {
                 if result.db.is_none() {
                     result.db = Some(PathBuf::from(positional));
                 } else {
-                    return Err(errors::RecallError::CLIError(format!(
-                        "extra positional argument '{}'", positional,
-                    )))
+                    bail!("extra positional argument '{}'", positional)
                 }
             },
         }
@@ -94,7 +98,7 @@ fn parse_config(mut iter: impl Iterator<Item = String>) -> Result<Config, errors
     Ok(result)
 }
 
-fn run(cfg: Config) -> Result<(), errors::RecallError> {
+fn run(cfg: Config) -> Result<(), anyhow::Error> {
     if cfg.h {
         println!("{}", help(&cfg.name));
         return Ok(())
@@ -104,28 +108,49 @@ fn run(cfg: Config) -> Result<(), errors::RecallError> {
         recall::set_verbose();
     }
 
-    let db = if let Some(file_path) = cfg.db {
+    if cfg.program.is_empty() && cfg.c {
+        bail!("the check flag '-c' was used and no program(s) was(were) found")
+    }
+
+    let db = if let Some(file_path) = cfg.db.as_ref() {
         DB::new(file_path)?
     } else {
         DB::new_temp()?
     };
 
+    if cfg.i {
+        let txn = db.begin_transaction();
+        txn.info()?;
+        txn.rollback()?;
+        return Ok(())
+    }
+
     if cfg.program.is_empty() {
         run_repl(db)?;
     } else {
-        run_batch(&cfg.program, db)?;
+        run_batch(&cfg, db)?;
     }
 
     Ok(())
 }
 
-fn run_batch(program: &String, db: DB) -> Result<(), errors::RecallError> {
+fn get_good_program(program: &String) -> Result<TypedProgram, anyhow::Error> {
     let scanner = Scanner::new(program);
     let mut parser = Parser::new(scanner);
     let program = parse_program(&mut parser)?;
+    analysis::check_range_restriction_property(&program)?;
+    let typed_program = analysis::typecheck(program)?;
+    Ok(typed_program)
+}
+
+fn run_batch(cfg: &Config, db: DB) -> Result<(), anyhow::Error> {
     let txn = db.begin_transaction();
     let naive_evaluator = eval::naive::NaiveEvaluator{};
-    let results = match eval::batch_eval(program, &txn, naive_evaluator) {
+    let program = get_good_program(&cfg.program)?;
+    if cfg.c {
+        return Ok(())
+    }
+    let results = match eval::batch_eval(&program, &txn, naive_evaluator) {
         Ok(results) => {
             txn.commit()?;
             results
@@ -134,7 +159,7 @@ fn run_batch(program: &String, db: DB) -> Result<(), errors::RecallError> {
             if let Err(e0) = txn.rollback() {
                 eprintln!("error could not rollback transaction: {}", e0)
             }
-            return Err(e)
+            return Err(e.into())
         },
     };
     results
@@ -146,7 +171,7 @@ fn run_batch(program: &String, db: DB) -> Result<(), errors::RecallError> {
     Ok(())
 }
 
-fn run_repl(db: DB) -> Result<(), errors::RecallError> {
+fn run_repl(db: DB) -> Result<(), anyhow::Error> {
     let mut rl = DefaultEditor::new()?;
 
     println!("Welcome to the recall repl");
@@ -184,10 +209,10 @@ fn run_repl(db: DB) -> Result<(), errors::RecallError> {
         let readline = rl.readline("recall> ");
         match readline {
             Ok(line) => {
-                let scanner = Scanner::new(&line);
-                let mut parser = Parser::new(scanner);
-                let program = match parse_program(&mut parser) {
-                    Ok(program) => program,
+                rl.add_history_entry(&line)?;
+
+                let program = match get_good_program(&line) {
+                    Ok(result) => result,
                     Err(err) => {
                         eprintln!("{}", err);
                         continue 'toplevel
@@ -195,7 +220,7 @@ fn run_repl(db: DB) -> Result<(), errors::RecallError> {
                 };
                 let txn = db.begin_transaction();
                 let naive_evaluator = eval::naive::NaiveEvaluator{};
-                let mut iter = match eval::iter_eval(program, &txn, naive_evaluator) {
+                let mut iter = match eval::iter_eval(&program, &txn, naive_evaluator) {
                     Ok(iter) => {
                         txn.commit()?;
                         iter
@@ -208,8 +233,6 @@ fn run_repl(db: DB) -> Result<(), errors::RecallError> {
                         continue 'toplevel
                     },
                 };
-
-                rl.add_history_entry(line.as_str())?;
 
                 // iterate (possibly infinite (not at the moment)) results
                 enable_raw_mode()?;
@@ -266,7 +289,9 @@ fn run_repl(db: DB) -> Result<(), errors::RecallError> {
         }
     }
 
-    rl.save_history(&history_path)?;
+    rl
+    .save_history(&history_path)
+    .context("could not save history")?;
 
     Ok(())
 }
@@ -286,9 +311,11 @@ fn help(program: &str) -> String {
     result.push('\n');
     result.push_str("Options:\n");
     result.push_str("-h:            help\n");
-    result.push_str("-v:            verbose, show the derivations for each iteration\n");
+    result.push_str("-v:            verbose (debug info)\n");
+    result.push_str("-i:            info\n");
     result.push_str("-f file:       read in datalog program from file\n");
     result.push_str("-s '...':      read in datalog program from string\n");
+    result.push_str("-c:            analysis only (check), prints out inferred declarations\n");
     result.push('\n');
     result.push_str("Argument:\n");
     result.push_str("[db]:          path to db root folder, if not supplied, create\n");

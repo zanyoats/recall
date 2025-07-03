@@ -1,54 +1,51 @@
+use std::collections::HashMap;
+use std::collections::HashSet;
+
 use crate::lang::scan::Scanner;
 use crate::lang::scan::Token;
 use crate::errors::RecallError;
 
-pub type Predicate = Term;
-pub type Declaration = Predicate;
+pub type FunctorTerm = Term;
+pub type Defs = HashMap<(String, u8), Vec<Literal>>;
+pub type Schemas = HashMap<(String, u8), Vec<u8>>;
 
 #[derive(Debug)]
 pub struct Program {
-    pub declarations: Vec<Declaration>,
+    pub declarations: Vec<FunctorTerm>,
     pub statements: Vec<Statement>,
 }
 
 #[derive(Debug)]
+pub struct TypedProgram {
+    pub defs: Defs,
+    pub facts: HashSet<(String, u8)>,
+    pub schemas: Schemas,
+    pub statements: Vec<TypedStatement>,
+}
+
+#[derive(Debug)]
 pub enum Statement {
-    Asserted(Literal),
-    Retracted(Literal),
-    Query(Predicate),
+    Assertion(Literal),
+    Retraction(Literal),
+    Query(FunctorTerm),
+}
+
+#[derive(Debug)]
+pub enum TypedStatement {
+    Fact(FunctorTerm),
+    Query(FunctorTerm),
+    Retraction(Literal),
 }
 
 #[derive(Debug, Clone)]
 pub struct Literal {
-    pub head: Predicate,
-    pub body: Vec<Predicate>,
+    pub head: FunctorTerm,
+    pub body: Vec<FunctorTerm>,
 }
 
 impl Literal {
-    fn from_head(head: Predicate) -> Self {
+    fn from_head(head: FunctorTerm) -> Self {
         Literal { head, body: vec![] }
-    }
-}
-
-impl Predicate {
-    pub fn new(name: String, args: Vec<Term>) -> Self {
-        Term::Functor(name, args)
-    }
-
-    pub fn name(term: &Term) -> &String{
-        if let Term::Functor(name, _) = term {
-            name
-        } else {
-            panic!("predicate not functor term type")
-        }
-    }
-
-    pub fn arguments(term: &Term) -> &Vec<Term> {
-        if let Term::Functor(_, args) = term {
-            args
-        } else {
-            panic!("predicate not functor term type")
-        }
     }
 }
 
@@ -64,6 +61,36 @@ pub enum Term {
     Functor(String, Vec<Term>),
 }
 
+impl Term {
+    pub fn functor(name: String, args: Vec<Term>) -> Self {
+        Term::Functor(name, args)
+    }
+
+    pub fn functor_name(&self) -> &String {
+        if let Term::Functor(name, _) = self {
+            name
+        } else {
+            unreachable!()
+        }
+    }
+
+    pub fn functor_arity(&self) -> u8 {
+        if let Term::Functor(_, args) = self {
+            args.len().try_into().unwrap()
+        } else {
+            unreachable!()
+        }
+    }
+
+    pub fn functor_args(&self) -> &Vec<Term> {
+        if let Term::Functor(_, args) = self {
+            args
+        } else {
+            unreachable!()
+        }
+    }
+}
+
 pub struct Parser<'a> {
     scanner: Scanner<'a>,
 }
@@ -74,18 +101,9 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Used to parse rules stored (as text) in db into Literal
-pub fn parse_rule<'a>(mut parser: Parser) -> Result<Literal, RecallError> {
-    let head = parse_literal(&mut parser)?;
-    expect_token(&mut parser, Token::If)?;
-    let body = parse_body(&mut parser)?;
-    expect_token(&mut parser, Token::Assertion)?;
-    Ok(Literal { head, body })
-}
-
 /// EBNF Grammar for Datalog
 /// <program>       ::= { <declaration> | <statement> }
-/// <declaration>   ::= "%!" <literal> "."
+/// <declaration>   ::= "#!" <literal> "."
 /// <statement>     ::= | <literal> "?"
 ///                     | <literal> "."
 ///                     | <literal> "!"
@@ -100,7 +118,7 @@ pub fn parse_rule<'a>(mut parser: Parser) -> Result<Literal, RecallError> {
 ///                     | <var>
 ///                     | [ "+" | "-" ] <integer>
 
-pub fn parse_program<'a>(parser: &'a mut Parser) -> Result<Program, RecallError> {
+pub fn parse_program<'a>(parser: &'a mut Parser) -> Result<Program, anyhow::Error> {
     let mut declarations = vec![];
     let mut statements = vec![];
     Ok(loop {
@@ -120,37 +138,37 @@ pub fn parse_program<'a>(parser: &'a mut Parser) -> Result<Program, RecallError>
     })
 }
 
-fn parse_statement<'a>(parser: &'a mut Parser) -> Result<Statement, RecallError> {
+fn parse_statement<'a>(parser: &'a mut Parser) -> Result<Statement, anyhow::Error> {
     let head = parse_literal(parser)?;
 
     match parser.scanner.next_token()? {
         Token::Query => Ok(Statement::Query(head)),
-        Token::Assertion => Ok(Statement::Asserted(Literal::from_head(head))),
-        Token::Retraction => Ok(Statement::Retracted(Literal::from_head(head))),
+        Token::Assertion => Ok(Statement::Assertion(Literal::from_head(head))),
+        Token::Retraction => Ok(Statement::Retraction(Literal::from_head(head))),
         Token::If => {
             let body = parse_body(parser)?;
 
             match parser.scanner.peek_token()? {
                 Token::Assertion => {
                     expect_token(parser, Token::Assertion)?;
-                    Ok(Statement::Asserted(Literal { head, body }))
+                    Ok(Statement::Assertion(Literal { head, body }))
                 },
                 Token::Retraction => {
                     expect_token(parser, Token::Retraction)?;
-                    Ok(Statement::Retracted(Literal { head, body }))
+                    Ok(Statement::Retraction(Literal { head, body }))
                 },
                 token => Err(RecallError::ParseError(format!(
                     "unpected token '{}' when parsing statement", token,
-                ))),
+                )).into()),
             }
         },
         token => Err(RecallError::ParseError(format!(
             "unpected token '{}' when parsing statement", token,
-        ))),
+        )).into()),
     }
 }
 
-fn parse_body<'a>(parser: &'a mut Parser) -> Result<Vec<Predicate>, RecallError> {
+fn parse_body<'a>(parser: &'a mut Parser) -> Result<Vec<FunctorTerm>, anyhow::Error> {
     let mut result = vec![parse_literal(parser)?];
 
     while let Token::Comma = parser.scanner.peek_token()? {
@@ -161,12 +179,12 @@ fn parse_body<'a>(parser: &'a mut Parser) -> Result<Vec<Predicate>, RecallError>
     Ok(result)
 }
 
-fn parse_literal<'a>(parser: &'a mut Parser) -> Result<Predicate, RecallError> {
+fn parse_literal<'a>(parser: &'a mut Parser) -> Result<FunctorTerm, anyhow::Error> {
     let name = match parse_term(parser)? {
         Term::Atom(s) | Term::Str(s) => s,
         _ => return Err(RecallError::ParseError(format!(
             "head position of literal needs to be an atom or str term",
-        ))),
+        )).into()),
     };
     let args =
         if let Token::LP = parser.scanner.peek_token()? {
@@ -184,10 +202,10 @@ fn parse_literal<'a>(parser: &'a mut Parser) -> Result<Predicate, RecallError> {
             vec![]
         };
 
-    Ok(Predicate::new(name, args))
+    Ok(Term::functor(name, args))
 }
 
-fn parse_terms<'a>(parser: &'a mut Parser) -> Result<Vec<Term>, RecallError> {
+fn parse_terms<'a>(parser: &'a mut Parser) -> Result<Vec<Term>, anyhow::Error> {
     let mut result = vec![parse_term(parser)?];
 
     while let Token::Comma = parser.scanner.peek_token()? {
@@ -198,7 +216,7 @@ fn parse_terms<'a>(parser: &'a mut Parser) -> Result<Vec<Term>, RecallError> {
     Ok(result)
 }
 
-fn parse_term<'a>(parser: &'a mut Parser) -> Result<Term, RecallError> {
+fn parse_term<'a>(parser: &'a mut Parser) -> Result<Term, anyhow::Error> {
     match parser.scanner.next_token()? {
         Token::Atom(s) => Ok(Term::Atom(s)),
         Token::Str(s) => Ok(Term::Str(s)),
@@ -212,7 +230,7 @@ fn parse_term<'a>(parser: &'a mut Parser) -> Result<Term, RecallError> {
             } else {
                 Err(RecallError::ParseError(format!(
                     "expected integer term but got '{}'", token,
-                )))
+                )).into())
             }
         },
         Token::Minus => {
@@ -223,16 +241,16 @@ fn parse_term<'a>(parser: &'a mut Parser) -> Result<Term, RecallError> {
             } else {
                 Err(RecallError::ParseError(format!(
                     "expected integer term but got '{}'", token,
-                )))
+                )).into())
             }
         },
         token => Err(RecallError::ParseError(format!(
             "expected term but got '{}'", token,
-        ))),
+        )).into()),
     }
 }
 
-fn expect_token<'a>(parser: &'a mut Parser, expected: Token) -> Result<(), RecallError> {
+fn expect_token<'a>(parser: &'a mut Parser, expected: Token) -> Result<(), anyhow::Error> {
     let actual = parser.scanner.next_token()?;
     if actual == expected {
         Ok(())
@@ -240,7 +258,7 @@ fn expect_token<'a>(parser: &'a mut Parser, expected: Token) -> Result<(), Recal
         Err(RecallError::ParseError(format!(
             "expected '{}' but got '{}'",
             expected, actual,
-        )))
+        )).into())
     }
 }
 
@@ -251,8 +269,8 @@ mod tests {
     #[test]
     fn it_parses_valid_program() {
         let program = "
-            % example program
-            %! link(atom, atom).
+            # example program
+            #! link(atom, atom).
             link(a, b).
             link(b, c).
             link(c, c).
