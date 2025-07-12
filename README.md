@@ -1,5 +1,7 @@
 # recall
 
+[![CI](https://github.com/zanyoats/recall/actions/workflows/ci.yml/badge.svg)](https://github.com/zanyoats/recall/actions/workflows/ci.yml)
+
 ## install
 
 ```

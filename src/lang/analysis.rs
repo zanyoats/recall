@@ -283,66 +283,6 @@ pub fn check_range_restriction_property(program: &Program) -> Result<(), anyhow:
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-/// Ensure the negation safety condition is not violated
-///
-////////////////////////////////////////////////////////////////////////////////
-
-fn collect_graph_cycles(
-    g: &tools::Graph<usize>,
-) -> Vec<Vec<usize>> {
-    fn visit_vertex(
-        g: &tools::Graph<usize>,
-        u: usize,
-        visited: &mut Vec<bool>,
-        parent: &mut Vec<i32>,
-        cycles: &mut Vec<Vec<usize>>,
-    ) {
-        if !visited[u] {
-            visited[u] = true;
-
-            for v in g[u].iter() {
-                // Collect self-cycles too
-                if u == *v {
-                    cycles.push(vec![u, u]);
-                    continue
-                }
-
-                if visited[*v] {
-                    let mut cycle = vec![*v, u];
-                    let mut p = parent[u];
-
-                    while p >= 0 {
-                        cycle.push(p as usize);
-                        if p as usize == *v {
-                            break
-                        }
-                        p = parent[p as usize];
-                    }
-                    if p as usize == *v {
-                        cycle.reverse();
-                        cycles.push(cycle);
-                    }
-                } else {
-                    parent[*v] = u as i32;
-                    visit_vertex(g, *v, visited, parent, cycles);
-                }
-            }
-        }
-    }
-
-    let n = g.len();
-    let mut visited = vec![false; n];
-    let mut parent = vec![-1; n];
-    let mut cycles = vec![];
-
-    for (u, _) in g.iter().enumerate() {
-        visit_vertex(g, u, &mut visited, &mut parent, &mut cycles);
-    }
-
-    cycles
-}
-
-////////////////////////////////////////////////////////////////////////////////
 /// Stratify program
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -467,6 +407,61 @@ fn collect_variables(term: &Term) -> Vec<&String> {
             .collect(),
         _ => vec![],
     }
+}
+
+fn collect_graph_cycles(
+    g: &tools::Graph<usize>,
+) -> Vec<Vec<usize>> {
+    fn visit_vertex(
+        g: &tools::Graph<usize>,
+        u: usize,
+        visited: &mut Vec<bool>,
+        parent: &mut Vec<i32>,
+        cycles: &mut Vec<Vec<usize>>,
+    ) {
+        if !visited[u] {
+            visited[u] = true;
+
+            for v in g[u].iter() {
+                // Collect self-cycles too
+                if u == *v {
+                    cycles.push(vec![u, u]);
+                    continue
+                }
+
+                if visited[*v] {
+                    let mut cycle = vec![*v, u];
+                    let mut p = parent[u];
+
+                    while p >= 0 {
+                        cycle.push(p as usize);
+                        if p as usize == *v {
+                            break
+                        }
+                        p = parent[p as usize];
+                    }
+                    if p as usize == *v {
+                        cycle.reverse();
+                        cycles.push(cycle);
+                    }
+                } else {
+                    parent[*v] = u as i32;
+                    visit_vertex(g, *v, visited, parent, cycles);
+                }
+            }
+        }
+    }
+
+    let n = g.len();
+    let mut visited = vec![false; n];
+    let mut parent = vec![-1; n];
+    let mut cycles = vec![];
+
+    for (u, _) in g.iter().enumerate() {
+        visit_vertex(g, u, &mut visited, &mut parent, &mut cycles);
+    }
+
+    cycles
 }
 
 mod tools {
