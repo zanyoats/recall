@@ -75,7 +75,10 @@ impl fmt::Display for Term {
             ),
             Term::Var(value) => write!(f, "{}", value),
             Term::Integer(value) => write!(f, "{}", value),
-            Term::Functor(name, terms) => {
+            Term::Functor(name, terms, negated) => {
+                if *negated {
+                    write!(f, "not ")?;
+                }
                 write!(f, "{}", name)?;
                 if terms.len() > 0 {
                     write!(f, "(")?;

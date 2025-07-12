@@ -4,7 +4,13 @@ use crate::lang::parse::TypedStatement;
 use crate::lang::parse::TypedProgram;
 use crate::lang::parse::FunctorTerm;
 use crate::lang::parse::Literal;
+use crate::lang::analysis;
 use crate::storage::db;
+
+pub struct DeclarationContext {
+    factlike_rules: Vec<FunctorTerm>,
+    strata: analysis::Strata,
+}
 
 pub trait QueryEvaluator<'txn> {
     type Iter: Iterator<Item = FunctorTerm> + Default;
@@ -13,7 +19,7 @@ pub trait QueryEvaluator<'txn> {
         &self,
         txn: &'txn db::TransactionOp,
         program: &TypedProgram,
-    ) -> Result<(), anyhow::Error>;
+    ) -> Result<DeclarationContext, anyhow::Error>;
 
     fn evaluate_assertion(
         &self,
@@ -25,6 +31,7 @@ pub trait QueryEvaluator<'txn> {
         &self,
         txn: &'txn db::TransactionOp,
         query: &FunctorTerm,
+        ctx: &DeclarationContext,
     ) -> Result<Self::Iter, anyhow::Error>;
 
     fn evaluate_retraction(
@@ -39,7 +46,7 @@ pub fn iter_eval<'program, 'txn, Engine: QueryEvaluator<'txn>>(
     txn: &'txn db::TransactionOp,
     evaluator: Engine,
 ) -> Result<Engine::Iter, anyhow::Error> {
-    evaluator.eval_declarations(txn, program)?;
+    let ctx = evaluator.eval_declarations(txn, program)?;
 
     for stmt in program.statements.iter() {
         match stmt {
@@ -47,7 +54,7 @@ pub fn iter_eval<'program, 'txn, Engine: QueryEvaluator<'txn>>(
                 evaluator.evaluate_assertion(txn, term)?;
             },
             TypedStatement::Query(term) => {
-                return evaluator.evaluate_query(txn, term);
+                return evaluator.evaluate_query(txn, term, &ctx);
             },
             TypedStatement::Retraction(literal) => {
                 evaluator.evaluate_retraction(txn, literal)?;
@@ -63,7 +70,7 @@ pub fn batch_eval<'program, 'txn, Engine: QueryEvaluator<'txn>>(
     txn: &'txn db::TransactionOp,
     evaluator: Engine,
 ) -> Result<Vec<FunctorTerm>, anyhow::Error> {
-    evaluator.eval_declarations(txn, program)?;
+    let ctx = evaluator.eval_declarations(txn, program)?;
 
     let mut result: Vec<FunctorTerm> = vec![];
 
@@ -73,7 +80,7 @@ pub fn batch_eval<'program, 'txn, Engine: QueryEvaluator<'txn>>(
                 evaluator.evaluate_assertion(txn, term)?;
             },
             TypedStatement::Query(term) => {
-                result.extend(evaluator.evaluate_query(txn, term)?);
+                result.extend(evaluator.evaluate_query(txn, term, &ctx)?);
             },
             TypedStatement::Retraction(literal) => {
                 evaluator.evaluate_retraction(txn, literal)?;

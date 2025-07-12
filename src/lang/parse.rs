@@ -37,7 +37,7 @@ pub enum TypedStatement {
     Retraction(Literal),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Literal {
     pub head: FunctorTerm,
     pub body: Vec<FunctorTerm>,
@@ -46,6 +46,16 @@ pub struct Literal {
 impl Literal {
     fn from_head(head: FunctorTerm) -> Self {
         Literal { head, body: vec![] }
+    }
+
+    pub fn is_rule(&self) -> bool {
+           self.body.len() > 0
+        || self.head.functor_arity() == 0
+    }
+
+    pub fn is_factlike_rule(&self) -> bool {
+           self.head.functor_arity() == 0
+        && self.body.len() == 0
     }
 }
 
@@ -58,16 +68,20 @@ pub enum Term {
     /// Grammar does not allow functor terms (at the moment). But this
     /// is still useful for packaging functor terms into literals since
     /// unification works on terms.
-    Functor(String, Vec<Term>),
+    Functor(String, Vec<Term>, bool),
 }
 
 impl Term {
-    pub fn functor(name: String, args: Vec<Term>) -> Self {
-        Term::Functor(name, args)
+    pub fn functor_spec(&self) -> String {
+        if let Term::Functor(name, args, _) = self {
+            format!("{}/{}", name, args.len())
+        } else {
+            unreachable!()
+        }
     }
 
     pub fn functor_name(&self) -> &String {
-        if let Term::Functor(name, _) = self {
+        if let Term::Functor(name, _, _) = self {
             name
         } else {
             unreachable!()
@@ -75,7 +89,7 @@ impl Term {
     }
 
     pub fn functor_arity(&self) -> u8 {
-        if let Term::Functor(_, args) = self {
+        if let Term::Functor(_, args, _) = self {
             args.len().try_into().unwrap()
         } else {
             unreachable!()
@@ -83,8 +97,16 @@ impl Term {
     }
 
     pub fn functor_args(&self) -> &Vec<Term> {
-        if let Term::Functor(_, args) = self {
+        if let Term::Functor(_, args, _) = self {
             args
+        } else {
+            unreachable!()
+        }
+    }
+
+    pub fn functor_negated(&self) -> bool {
+        if let Term::Functor(_, _, negated) = self {
+            *negated
         } else {
             unreachable!()
         }
@@ -109,7 +131,7 @@ impl<'a> Parser<'a> {
 ///                     | <literal> "!"
 ///                     | <literal> ":-" <body> "."
 ///                     | <literal> ":-" <body> "!"
-/// <body>          ::= <literal> { "," <literal> }
+/// <body>          ::= [ "not" ] <literal> { "," [ "not" ] <literal> }
 /// <literal>       ::= | <atom> [ "(" [ <terms> ] ")" ]
 ///                     | <str> [ "(" [ <terms> ] ")" ]
 /// <terms>         ::= <term> { "," <term> }
@@ -126,7 +148,7 @@ pub fn parse_program<'a>(parser: &'a mut Parser) -> Result<Program, anyhow::Erro
             Token::End => break Program { declarations, statements },
             Token::Decl => {
                 expect_token(parser, Token::Decl)?;
-                declarations.push(parse_literal(parser)?);
+                declarations.push(parse_literal(parser, false)?);
                 expect_token(parser, Token::Assertion)?;
                 continue
             },
@@ -139,7 +161,7 @@ pub fn parse_program<'a>(parser: &'a mut Parser) -> Result<Program, anyhow::Erro
 }
 
 fn parse_statement<'a>(parser: &'a mut Parser) -> Result<Statement, anyhow::Error> {
-    let head = parse_literal(parser)?;
+    let head = parse_literal(parser, false)?;
 
     match parser.scanner.next_token()? {
         Token::Query => Ok(Statement::Query(head)),
@@ -169,17 +191,33 @@ fn parse_statement<'a>(parser: &'a mut Parser) -> Result<Statement, anyhow::Erro
 }
 
 fn parse_body<'a>(parser: &'a mut Parser) -> Result<Vec<FunctorTerm>, anyhow::Error> {
-    let mut result = vec![parse_literal(parser)?];
+    let mut negated = false;
+
+    if let Token::Not = parser.scanner.peek_token()? {
+        negated = true;
+        parser.scanner.next_token()?;
+    }
+
+    let mut result = vec![parse_literal(parser, negated)?];
 
     while let Token::Comma = parser.scanner.peek_token()? {
         expect_token(parser, Token::Comma)?;
-        result.push(parse_literal(parser)?);
+
+        let mut negated = false;
+
+        if let Token::Not = parser.scanner.peek_token()? {
+            negated = true;
+            parser.scanner.next_token()?;
+        }
+
+
+        result.push(parse_literal(parser, negated)?);
     }
 
     Ok(result)
 }
 
-fn parse_literal<'a>(parser: &'a mut Parser) -> Result<FunctorTerm, anyhow::Error> {
+fn parse_literal<'a>(parser: &'a mut Parser, negated: bool) -> Result<FunctorTerm, anyhow::Error> {
     let name = match parse_term(parser)? {
         Term::Atom(s) | Term::Str(s) => s,
         _ => return Err(RecallError::ParseError(format!(
@@ -202,7 +240,7 @@ fn parse_literal<'a>(parser: &'a mut Parser) -> Result<FunctorTerm, anyhow::Erro
             vec![]
         };
 
-    Ok(Term::functor(name, args))
+    Ok(Term::Functor(name, args, negated))
 }
 
 fn parse_terms<'a>(parser: &'a mut Parser) -> Result<Vec<Term>, anyhow::Error> {

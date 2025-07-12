@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::iter::IntoIterator;
 
@@ -9,7 +10,9 @@ use crate::lang::parse::Literal;
 use crate::lang::parse::FunctorTerm;
 use crate::lang::unify::Bindings;
 use crate::lang::unify;
+use crate::lang::analysis;
 use crate::eval::QueryEvaluator;
+use crate::eval::DeclarationContext;
 use crate::storage::db;
 use crate::storage::tuple::ParameterType;
 use crate::errors;
@@ -35,7 +38,7 @@ impl<'a> QueryEvaluator<'a> for NaiveEvaluator {
         &self,
         txn: &'a db::TransactionOp,
         program: &parse::TypedProgram,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<DeclarationContext, anyhow::Error> {
         // check on declarations used in non-head positions
         for ((name, arity), scm) in program.schemas.iter() {
             let key = (name.to_string(), *arity);
@@ -78,7 +81,11 @@ impl<'a> QueryEvaluator<'a> for NaiveEvaluator {
             txn.define(name, &rule_text, scm)?;
         }
 
-        Ok(())
+        // stratify program
+        let (factlike_rules, rules) = collect_and_parse_rules(txn)?;
+        let strata = analysis::stratify_rules(rules)?;
+
+        Ok(DeclarationContext { factlike_rules, strata })
     }
 
     fn evaluate_assertion(
@@ -86,7 +93,7 @@ impl<'a> QueryEvaluator<'a> for NaiveEvaluator {
         txn: &'a db::TransactionOp,
         term: &FunctorTerm,
     ) -> Result<(), anyhow::Error> {
-        if let Term::Functor(name, args) = term {
+        if let Term::Functor(name, args, _) = term {
             let input =
                 args
                 .into_iter()
@@ -106,17 +113,21 @@ impl<'a> QueryEvaluator<'a> for NaiveEvaluator {
         &self,
         txn: &'a db::TransactionOp,
         query: &FunctorTerm,
+        ctx: &DeclarationContext,
     ) -> Result<Self::Iter, anyhow::Error> {
-        let (facts0, rules) = collect_and_parse_rules(txn)?;
-
         let mut facts =
             txn
             .query(txn.prefix_all())?
             .map(|(_, term)| term)
             .collect::<Vec<_>>();
-        facts.extend(facts0.into_iter());
+        facts.extend(
+            ctx
+            .factlike_rules
+            .iter()
+            .map(|functor| functor.clone())
+        );
 
-        Ok(eval_query(query, rules, facts))
+        Ok(eval_query(query, &ctx.strata, facts))
     }
 
     fn evaluate_retraction(
@@ -168,8 +179,7 @@ fn collect_and_parse_rules(txn: &db::TransactionOp) -> Result<(Vec<FunctorTerm>,
     let mut rules = vec![];
     for stmt in program.statements {
         if let parse::Statement::Assertion(literal) = stmt {
-            // a rule is like a fact if its arity is 0 and has empty body
-            if literal.head.functor_arity() == 0 && literal.body.len() == 0 {
+            if literal.is_factlike_rule() {
                 facts.push(literal.head);
             } else {
                 rules.push(literal)
@@ -190,35 +200,44 @@ impl Iterator for NaiveResultIter {
 
 fn eval_query(
     query: &FunctorTerm,
-    rules: Vec<Literal>,
+    strata: &analysis::Strata,
     facts: Vec<FunctorTerm>,
 ) -> NaiveResultIter {
-    let mut k = 0;
-
-    if crate::get_verbose() {
-        eprintln!("INFO: Generation {}", k);
-    }
+    // start `learned` with just the facts
     let mut learned= HashSet::from_iter(
         facts
         .into_iter()
         .map(|fact| {
             if crate::get_verbose() {
-                eprintln!("INFO: {} (new)", fact);
+                eprintln!("INFO: {} (fact)", fact);
             }
             fact
         })
     );
 
-    // iterate until fixpoint: condition when no new facts are learnt
-    loop {
-        k += 1;
-        if can_halt_iterations(&rules, &mut learned, k) {
-            break;
-        }
-    };
 
-    if crate::get_verbose() {
-        eprintln!("INFO: completed in {} generations", k);
+    // iterate until fixpoint: condition when no new facts are learnt
+    for (i, stratum) in strata.iter().enumerate() {
+        if crate::get_verbose() {
+            println!("INFO: stratum/{}", i);
+        }
+
+        let mut j: i32 = 0;
+        loop {
+            if crate::get_verbose() {
+                eprintln!("\tINFO: iteration/{}", j);
+            }
+
+            if can_halt_iterations(&stratum, &mut learned) {
+                break;
+            }
+
+            j += 1;
+        }
+
+        if crate::get_verbose() {
+            eprintln!("\tINFO: completed stratum/{} in {} iterations", i, j);
+        }
     }
 
     NaiveResultIter {
@@ -236,12 +255,7 @@ fn eval_query(
 fn can_halt_iterations<'a>(
     rules: &'a [Literal],
     learned: &'a mut HashSet<FunctorTerm>,
-    k: i32,
 ) -> bool {
-    if crate::get_verbose() {
-        eprintln!("INFO: Generation {}", k);
-    }
-
     let deduced: Vec<FunctorTerm> =
         rules
         .iter()
@@ -261,12 +275,12 @@ fn can_halt_iterations<'a>(
         .map(|predicate| {
             if learned.insert(predicate.clone()) {
                 if crate::get_verbose() {
-                    eprintln!("INFO: {} (new)", predicate);
+                    eprintln!("\tINFO: {} (new)", predicate);
                 }
                 false
             } else {
                 if crate::get_verbose() {
-                    eprintln!("INFO: {}", predicate);
+                    eprintln!("\tINFO: {}", predicate);
                 }
                 true
             }
@@ -311,17 +325,42 @@ fn eval_predicate<'a>(
     predicate0: &'a FunctorTerm,
     learned: &'a HashSet<FunctorTerm>,
     env: Option<Bindings<'a>>,
-) -> impl Iterator<Item = Bindings<'a>> {
-    learned
-    .iter()
-    .filter_map(move |predicate| {
-        match env.clone() {
-            Some(bindings) =>
-                unify::unify_with_bindings(predicate0, predicate, bindings),
-            None =>
-                unify::unify(predicate0, predicate),
+) -> Vec<Bindings<'a>> {
+    if predicate0.functor_negated() {
+        let found =
+            learned
+            .iter()
+            .any(|predicate| {
+                if let Some(bindings) = env.clone() {
+                    unify::unify_with_bindings(predicate0, predicate, bindings.clone())
+                    .is_some()
+                } else {
+                    unify::unify(predicate0, predicate)
+                    .is_some()
+                }
+            });
+
+        if found {
+            vec![]
+        } else {
+            env
+            .map_or(
+                vec![HashMap::new()],
+                |bindings| vec![bindings],
+            )
         }
-    })
+    } else {
+        learned
+        .iter()
+        .filter_map(move |predicate| {
+            if let Some(bindings) = env.clone() {
+                unify::unify_with_bindings(predicate0, predicate, bindings.clone())
+            } else {
+                unify::unify(predicate0, predicate)
+            }
+        })
+        .collect()
+    }
 }
 
 #[cfg(test)]
@@ -387,22 +426,22 @@ mod tests {
         assert_eq!(rules.len(), 1);
         assert_eq!(queries.len(), 2);
         let result =
-            eval_query(&queries[0], rules.clone(), facts.clone())
+            eval_query(&queries[0], &vec![rules.clone()], facts.clone())
             .collect::<HashSet<FunctorTerm>>();
 
         assert_eq!(result, HashSet::from_iter(vec![
-            Term::Functor("link".to_string(), vec![Term::Atom("a".to_string()), Term::Atom("b".to_string())]),
-            Term::Functor("link".to_string(), vec![Term::Atom("b".to_string()), Term::Atom("c".to_string())]),
-            Term::Functor("link".to_string(), vec![Term::Atom("c".to_string()), Term::Atom("c".to_string())]),
-            Term::Functor("link".to_string(), vec![Term::Atom("c".to_string()), Term::Atom("d".to_string())]),
+            Term::Functor("link".to_string(), vec![Term::Atom("a".to_string()), Term::Atom("b".to_string())], false),
+            Term::Functor("link".to_string(), vec![Term::Atom("b".to_string()), Term::Atom("c".to_string())], false),
+            Term::Functor("link".to_string(), vec![Term::Atom("c".to_string()), Term::Atom("c".to_string())], false),
+            Term::Functor("link".to_string(), vec![Term::Atom("c".to_string()), Term::Atom("d".to_string())], false),
         ].into_iter()));
 
         let result =
-            eval_query(&queries[1], rules, facts)
+            eval_query(&queries[1], &vec![rules], facts)
             .collect::<HashSet<FunctorTerm>>();
 
         assert_eq!(result, HashSet::from_iter(vec![
-            Term::Functor("same".to_string(), vec![Term::Atom("c".to_string())]),
+            Term::Functor("same".to_string(), vec![Term::Atom("c".to_string())], false),
         ].into_iter()));
     }
 }

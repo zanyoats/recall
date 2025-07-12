@@ -53,7 +53,7 @@ fn parse_config(mut iter: impl Iterator<Item = String>) -> Result<Config, anyhow
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "-h" => {
+            "-h" | "--help" => {
                 result.h = true;
             },
             "-v" => {
@@ -83,13 +83,13 @@ fn parse_config(mut iter: impl Iterator<Item = String>) -> Result<Config, anyhow
                 }
             },
             other if other.starts_with('-') => {
-                bail!("unknown flag '{}'", other)
+                bail!("unknown flag '{}'\n\n{}", other, help(&result.name));
             },
             positional => {
                 if result.db.is_none() {
                     result.db = Some(PathBuf::from(positional));
                 } else {
-                    bail!("extra positional argument '{}'", positional)
+                    bail!("extra positional argument '{}'\n\n{}", positional, help(&result.name))
                 }
             },
         }
@@ -112,6 +112,11 @@ fn run(cfg: Config) -> Result<(), anyhow::Error> {
         bail!("the check flag '-c' was used and no program(s) was(were) found")
     }
 
+    if cfg.c {
+        let _ = get_good_program(&cfg.program)?;
+        return Ok(())
+    }
+
     let db = if let Some(file_path) = cfg.db.as_ref() {
         DB::new(file_path)?
     } else {
@@ -128,7 +133,7 @@ fn run(cfg: Config) -> Result<(), anyhow::Error> {
     if cfg.program.is_empty() {
         run_repl(db)?;
     } else {
-        run_batch(&cfg, db)?;
+        run_batch(&cfg.program, db)?;
     }
 
     Ok(())
@@ -143,13 +148,10 @@ fn get_good_program(program: &String) -> Result<TypedProgram, anyhow::Error> {
     Ok(typed_program)
 }
 
-fn run_batch(cfg: &Config, db: DB) -> Result<(), anyhow::Error> {
+fn run_batch(program_text: &String, db: DB) -> Result<(), anyhow::Error> {
     let txn = db.begin_transaction();
     let naive_evaluator = eval::naive::NaiveEvaluator{};
-    let program = get_good_program(&cfg.program)?;
-    if cfg.c {
-        return Ok(())
-    }
+    let program = get_good_program(program_text)?;
     let results = match eval::batch_eval(&program, &txn, naive_evaluator) {
         Ok(results) => {
             txn.commit()?;
@@ -157,7 +159,9 @@ fn run_batch(cfg: &Config, db: DB) -> Result<(), anyhow::Error> {
         },
         Err(e) => {
             if let Err(e0) = txn.rollback() {
-                eprintln!("error could not rollback transaction: {}", e0)
+                eprintln!("NOTE: could not rollback transaction: {}", e0);
+            } else {
+                eprintln!("NOTE: transaction rolled back for below error");
             }
             return Err(e.into())
         },
@@ -227,7 +231,7 @@ fn run_repl(db: DB) -> Result<(), anyhow::Error> {
                     },
                     Err(e) => {
                         if let Err(e0) = txn.rollback() {
-                            eprintln!("warning: failed to rollback transaction: {}", e0);
+                            eprintln!("NOTE: could not rollback transaction: {}", e0);
                         }
                         eprintln!("{}", e);
                         continue 'toplevel

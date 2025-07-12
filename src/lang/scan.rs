@@ -25,6 +25,8 @@ pub enum Token {
     LP,
     RP,
     Decl,
+    /* keywords */
+    Not,
     /* end of file */
     End,
 }
@@ -44,6 +46,7 @@ impl PartialEq for Token {
             | (Assertion, Assertion)
             | (Retraction, Retraction)
             | (Query, Query)
+            | (Not, Not)
             | (If, If)
             | (Comma, Comma)
             | (Plus, Plus)
@@ -81,6 +84,8 @@ impl fmt::Display for Token {
             Minus       => write!(f, "-"),
             LP          => write!(f, "("),
             RP          => write!(f, ")"),
+            /* keywords */
+            Not         => write!(f, "not"),
             /* end of file */
             End         => write!(f, "<EOF>"),
         }
@@ -156,12 +161,17 @@ impl<'a> Scanner<'a> {
                         .collect::<String>();
                     return Ok(Var(s))
                 }
-                /* start of atoms */
+                /* start of atoms or keywords */
                 'a'..='z' => {
                     let s = iter::once(ch)
                         .chain(iter::from_fn(|| self.iterable.next_if(|s| s.is_ascii_alphanumeric() || *s == '_')))
                         .collect::<String>();
-                    return Ok(Atom(s))
+
+                    if s == "not" { /* is this a reserved atom (keyword) */
+                        return Ok(Not)
+                    } else {
+                        return Ok(Atom(s))
+                    }
                 }
                 /* start if number */
                 '0'..='9' => {
