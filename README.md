@@ -4,7 +4,7 @@
 
 ## install
 
-```
+```sh
 cargo install --path . # install to default path
 ```
 
@@ -12,7 +12,7 @@ cargo install --path . # install to default path
 
 a proof of concept datalog engine using rocksdb.
 
-```sh
+```plaintext
 cargo run -- -h
 program path: target/debug/recall
 usage: <program> [ options ] [ db ]

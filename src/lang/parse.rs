@@ -180,12 +180,12 @@ fn parse_statement<'a>(parser: &'a mut Parser) -> Result<Statement, anyhow::Erro
                     Ok(Statement::Retraction(Literal { head, body }))
                 },
                 token => Err(RecallError::ParseError(format!(
-                    "unpected token '{}' when parsing statement", token,
+                    "unexpected token '{}' when parsing statement", token,
                 )).into()),
             }
         },
         token => Err(RecallError::ParseError(format!(
-            "unpected token '{}' when parsing statement", token,
+            "unexpected token '{}' when parsing statement", token,
         )).into()),
     }
 }

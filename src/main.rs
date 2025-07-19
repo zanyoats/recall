@@ -144,6 +144,7 @@ fn get_good_program(program: &String) -> Result<TypedProgram, anyhow::Error> {
     let mut parser = Parser::new(scanner);
     let program = parse_program(&mut parser)?;
     analysis::check_range_restriction_property(&program)?;
+    analysis::check_negation_safety_condition(&program)?;
     let typed_program = analysis::typecheck(program)?;
     Ok(typed_program)
 }

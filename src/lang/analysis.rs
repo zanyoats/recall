@@ -262,6 +262,7 @@ pub fn check_range_restriction_property(program: &Program) -> Result<(), anyhow:
     for stmt in program.statements.iter() {
         if let Statement::Assertion(literal) = stmt {
             let name = literal.head.functor_name();
+            let arity = literal.head.functor_arity();
             let head_vars = collect_variables(&literal.head);
             let body_vars =
                 literal
@@ -271,9 +272,10 @@ pub fn check_range_restriction_property(program: &Program) -> Result<(), anyhow:
                 .collect::<Vec<&String>>();
             for head_var in head_vars {
                 if !body_vars.contains(&head_var) {
-                    return Err(errors::RecallError::TypeError(
-                        format!("variable '{}' in head of '{}' not found in body", head_var, name)
-                    ).into())
+                    return Err(errors::RecallError::TypeError(format!(
+                        "variable '{}' in head of {}/{} not found in body",
+                        head_var, name, arity,
+                    )).into())
                 }
             }
         }
@@ -281,6 +283,46 @@ pub fn check_range_restriction_property(program: &Program) -> Result<(), anyhow:
 
     Ok(())
 }
+
+////////////////////////////////////////////////////////////////////////////////
+/// Ensure negation safety condition
+///
+/// Violates: foo(X, Y, Z) :- bar(X), baz(Y), not quuz(Z).
+///   -> variable 'Z' is not used in a positive position
+/// Ok:       foo(X, Y, Z) :- bar(X), baz(Y), bax(Z), not quuz(Z).
+///   -> variable 'Z' is used in a positive position with 'bax(Z)'
+////////////////////////////////////////////////////////////////////////////////
+
+pub fn check_negation_safety_condition(program: &Program) -> Result<(), anyhow::Error> {
+    for stmt in program.statements.iter() {
+        if let Statement::Assertion(literal) = stmt {
+            let name = literal.head.functor_name();
+            let arity = literal.head.functor_arity();
+
+            let mut pos: Vec<&String> = vec![];
+            let mut neg: Vec<&String> = vec![];
+            for functor in literal.body.iter() {
+                if functor.functor_negated() {
+                    neg.extend(collect_variables(functor).iter());
+                } else {
+                    pos.extend(collect_variables(functor).iter());
+                }
+            }
+
+            for neg_var in neg {
+                if !pos.contains(&neg_var) {
+                    return Err(errors::RecallError::TypeError(format!(
+                        "variable '{}' in head of {}/{} not found in body in a positive position",
+                        neg_var, name, arity,
+                    )).into())
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 
 ////////////////////////////////////////////////////////////////////////////////
 /// Stratify program
@@ -619,6 +661,78 @@ mod tests {
     use crate::lang::parse::Parser;
     use crate::lang::parse::Statement;
     use crate::lang::parse::parse_program;
+
+    #[test]
+    fn it_checks_range_restriction_property() -> Result<(), anyhow::Error> {
+        { // valid
+            let program = "
+                foo.
+            ";
+            let scanner = Scanner::new(program);
+            let mut parser = Parser::new(scanner);
+            let program = parse_program(&mut parser)?;
+            check_range_restriction_property(&program)?;
+        }
+
+        { // valid
+            let program = "
+                foo(X, Y, Z) :- bar(X), baz(Z, X), quux(Y).
+            ";
+            let scanner = Scanner::new(program);
+            let mut parser = Parser::new(scanner);
+            let program = parse_program(&mut parser)?;
+            check_range_restriction_property(&program)?;
+        }
+
+        { // invalid
+            let program = "
+                foo(X, Y, Z) :- bar(X), baz(Z, X), quux(Z).
+            ";
+            let scanner = Scanner::new(program);
+            let mut parser = Parser::new(scanner);
+            let program = parse_program(&mut parser)?;
+            let err = check_range_restriction_property(&program).unwrap_err();
+            assert!(err.to_string().contains("variable 'Y' in head of foo/3 not found in body"));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn it_checks_negation_safety_condition() -> Result<(), anyhow::Error> {
+        { // valid
+            let program = "
+                foo.
+            ";
+            let scanner = Scanner::new(program);
+            let mut parser = Parser::new(scanner);
+            let program = parse_program(&mut parser)?;
+            check_negation_safety_condition(&program)?;
+        }
+
+        { // valid
+            let program = "
+                foo(X, Y, Z) :- bar(X), baz(Y), bax(Z), not quuz(Z).
+            ";
+            let scanner = Scanner::new(program);
+            let mut parser = Parser::new(scanner);
+            let program = parse_program(&mut parser)?;
+            check_negation_safety_condition(&program)?;
+        }
+
+        { // invalid
+            let program = "
+                foo(X, Y, Z) :- bar(X), baz(Y), not quuz(Z).
+            ";
+            let scanner = Scanner::new(program);
+            let mut parser = Parser::new(scanner);
+            let program = parse_program(&mut parser)?;
+            let err = check_negation_safety_condition(&program).unwrap_err();
+            assert!(err.to_string().contains("variable 'Z' in head of foo/3 not found in body in a positive position"));
+        }
+
+        Ok(())
+    }
 
     #[test]
     fn it_stratifies_programs() -> Result<(), anyhow::Error> {
