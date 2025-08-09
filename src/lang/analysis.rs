@@ -22,9 +22,10 @@ use crate::errors;
 fn convert_to_typed_term(term: &Term) -> Term {
     match term {
         Term::Atom(_) => Term::Atom("atom".to_string()),
-        Term::Integer(_) => Term::Atom("int".to_string()),
+        Term::Int(_) => Term::Atom("int".to_string()),
         Term::Str(_) => Term::Atom("string".to_string()),
         Term::Var(s) => Term::Var(s.to_string()),
+        Term::AggVar(_, _) => Term::Atom("int".to_string()),
         Term::Functor(_, _, _) => unreachable!(),
     }
 }
@@ -250,6 +251,73 @@ pub fn typecheck(program: Program) -> Result<TypedProgram, anyhow::Error> {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+/// Ensure no aggegrate variables are used in the following positions:
+///   - body of rule
+///   - query
+/// Ensure no variable used in aggregated context is used outside in head
+/// of rule
+////////////////////////////////////////////////////////////////////////////////
+
+pub fn check_aggregate_var_usage(program: &Program) -> Result<(), anyhow::Error> {
+    for stmt in program.statements.iter() {
+        if let Statement::Assertion(literal) = stmt {
+            let name = literal.head.functor_name();
+            let arity = literal.head.functor_arity();
+
+            // aggregate var usage is correct in head of rule
+            {
+                let mut regular_vars = vec![];
+                let mut agg_vars = vec![];
+                for arg in literal.head.functor_args() {
+                    match arg {
+                        Term::Var(v) => regular_vars.push(v),
+                        Term::AggVar(_, v) => agg_vars.push(v),
+                        _ => continue,
+                    }
+                }
+                for agg_var in agg_vars {
+                    if regular_vars.contains(&agg_var) {
+                        return Err(errors::RecallError::TypeError(format!(
+                            "aggregate variable '{}' used in non-aggregate context in the head of the rule {}/{}",
+                            agg_var, name, arity,
+                        )).into())
+                    }
+                }
+            }
+
+            // check invalid use in body of rule
+            for functor in literal.body.iter() {
+                for arg in functor.functor_args() {
+                    if let Term::AggVar(_, var) = arg {
+                        return Err(errors::RecallError::TypeError(format!(
+                            "aggregate variable '{}' found in the body of the rule {}/{}",
+                            var, name, arity,
+                        )).into())
+                    }
+                }
+            }
+            continue
+        }
+
+        // check invalid use in query
+        if let Statement::Query(functor) = stmt {
+            let name = functor.functor_name();
+            for arg in functor.functor_args() {
+                if let Term::AggVar(_, var) = arg {
+                    return Err(errors::RecallError::TypeError(format!(
+                        "aggregate variable '{}' found in the query {}",
+                        var, name,
+                    )).into())
+                }
+            }
+            continue
+        }
+    }
+
+    Ok(())
+}
+
+////////////////////////////////////////////////////////////////////////////////
 /// Ensure the range restriction property is not violated
 ///
 /// Violates: foo(X, Y, Z) :- bar(X), baz(Z, X), quux(Z).
@@ -330,7 +398,6 @@ pub fn check_negation_safety_condition(program: &Program) -> Result<(), anyhow::
 
 pub type Strata = Vec<Vec<Literal>>;
 
-// TODO: check no cycles contain a negated edge, here???
 pub fn stratify_rules(rules: Vec<Literal>) -> Result<Strata, anyhow::Error> {
     use tools::*;
 
@@ -360,7 +427,12 @@ pub fn stratify_rules(rules: Vec<Literal>) -> Result<Strata, anyhow::Error> {
             (*functor_spec, i)
         })
     );
+
+    // labelled negated edges
     let mut negated: Graph<bool> = vec![vec![]; n];
+
+    // labelled aggregated edges
+    let mut aggregated: Graph<bool> = vec![vec![]; n];
 
     // build precedence graph from rules
     let mut p = Precedence::new(n);
@@ -371,11 +443,17 @@ pub fn stratify_rules(rules: Vec<Literal>) -> Result<Strata, anyhow::Error> {
             for body_functor in rule.body.iter() {
                 let body_functor_spec = body_functor.functor_spec();
 
+                // exclude facts in body as they do not contribute to edges in the graph
                 if let Some(u) = rules_map.get(&body_functor_spec) {
                     let v = rules_map[head_functor_spec];
+
                     p.add(*u, v);
+
                     // label negated edges
                     negated[*u].push(body_functor.functor_negated());
+
+                    // label aggregated edges
+                    aggregated[*u].push(rule.head.functor_aggregated());
                 }
             }
         }
@@ -383,7 +461,9 @@ pub fn stratify_rules(rules: Vec<Literal>) -> Result<Strata, anyhow::Error> {
 
     let cycles = collect_graph_cycles(&p.graph);
 
-    // Detect if a cycle path contains at least one negative edge
+    // Detect if a cycle path contains at least:
+    //   one negative edge
+    //   one aggregated edge
     for cycle in cycles {
         let mut i = 0;
         let mut j = 1;
@@ -399,7 +479,18 @@ pub fn stratify_rules(rules: Vec<Literal>) -> Result<Strata, anyhow::Error> {
 
             if negated[u][v_index] == true {
                 return Err(errors::RecallError::RuntimeError(format!(
-                    "The rules {} form a cycle that contain a negative (using \"not\") link. This is not allowed because the program cannot be stratified before evaluating.",
+                    "The rules {} form a cycle that contains a negative (using \"not\") link. This is not allowed because the program cannot be stratified.",
+                    cycle
+                    .iter()
+                    .map(|u| rules_list[*u].to_string())
+                    .collect::<Vec<_>>()
+                    .join(" -> "),
+                )).into())
+            }
+
+            if aggregated[u][v_index] == true {
+                return Err(errors::RecallError::RuntimeError(format!(
+                    "The rules {} form a cycle that contains a aggregated link. This is not allowed because the program cannot be stratified.",
                     cycle
                     .iter()
                     .map(|u| rules_list[*u].to_string())
@@ -442,6 +533,7 @@ pub fn stratify_rules(rules: Vec<Literal>) -> Result<Strata, anyhow::Error> {
 fn collect_variables(term: &Term) -> Vec<&String> {
     match term {
         Term::Var(s) => vec![s],
+        Term::AggVar(_, s) => vec![s],
         Term::Functor(_, terms, _) =>
             terms
             .iter()
@@ -663,6 +755,64 @@ mod tests {
     use crate::lang::parse::parse_program;
 
     #[test]
+    fn it_checks_aggregate_var_usage() -> Result<(), anyhow::Error> {
+        { // valid
+            let program = "
+                foo(X, Y, Z) :- bar(X), baz(Z, X), quux(Y).
+            ";
+            let scanner = Scanner::new(program);
+            let mut parser = Parser::new(scanner);
+            let program = parse_program(&mut parser)?;
+            check_aggregate_var_usage(&program)?;
+        }
+
+        { // valid
+            let program = "
+                foo(X, Y, count<Z>) :- bar(X), baz(Z, X), quux(Y).
+            ";
+            let scanner = Scanner::new(program);
+            let mut parser = Parser::new(scanner);
+            let program = parse_program(&mut parser)?;
+            check_aggregate_var_usage(&program)?;
+        }
+
+        { // invalid, body of rule
+            let program = "
+                foo(X, Y, Z) :- bar(X), baz(Z, X), quux(count<Z>).
+            ";
+            let scanner = Scanner::new(program);
+            let mut parser = Parser::new(scanner);
+            let program = parse_program(&mut parser)?;
+            let err = check_aggregate_var_usage(&program).unwrap_err();
+            assert!(err.to_string().contains("aggregate variable 'Z' found in the body of the rule foo/3"));
+        }
+
+        { // invalid, query
+            let program = "
+                foo(X, count<Y>)?
+            ";
+            let scanner = Scanner::new(program);
+            let mut parser = Parser::new(scanner);
+            let program = parse_program(&mut parser)?;
+            let err = check_aggregate_var_usage(&program).unwrap_err();
+            assert!(err.to_string().contains("aggregate variable 'Y' found in the query foo"));
+        }
+
+        { // invalid, usage of agg var
+            let program = "
+                foo(X, Y, count<X>) :- bar(X), baz(Y).
+            ";
+            let scanner = Scanner::new(program);
+            let mut parser = Parser::new(scanner);
+            let program = parse_program(&mut parser)?;
+            let err = check_aggregate_var_usage(&program).unwrap_err();
+            assert!(err.to_string().contains("aggregate variable 'X' used in non-aggregate context in the head of the rule foo/3"));
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn it_checks_range_restriction_property() -> Result<(), anyhow::Error> {
         { // valid
             let program = "
@@ -805,6 +955,17 @@ mod tests {
             assert_eq!(strata.len(), 4);
         }
 
+        { // valid usage of "not"
+            let program = "
+                a. # dummy rule
+                b :- a.
+                c :- not b.
+            ";
+            let rules = get_rules(program)?;
+            let strata = stratify_rules(rules.clone())?;
+            assert_eq!(strata.len(), 3);
+        }
+
         { // p-q cycle with "not"
             let program = "
                 p :- not q.
@@ -812,7 +973,40 @@ mod tests {
             ";
             let rules = get_rules(program)?;
             let err = stratify_rules(rules.clone()).unwrap_err();
-            assert!(err.to_string().contains("cycle that contain a negative"));
+            assert!(err.to_string().contains("cycle that contains a negative"));
+        }
+
+        { // valid usage of aggregation
+            let program = "
+                c(X) :- foo(X).
+                a(X) :- b(X).
+                b(count<X>) :- c(X).
+            ";
+            let rules = get_rules(program)?;
+            let strata = stratify_rules(rules.clone())?;
+            assert_eq!(strata.len(), 3);
+        }
+
+        { // cycle with aggregation
+            let program = "
+                c(X) :- a(X).
+                a(X) :- b(X).
+                b(count<X>) :- c(X).
+            ";
+            let rules = get_rules(program)?;
+            let err = stratify_rules(rules.clone()).unwrap_err();
+            assert!(err.to_string().contains("cycle that contains a aggregated"));
+        }
+
+        { // another cycle with aggregation
+            let program = "
+                q(X) :- foo(X).
+                p(X) :- q(X).
+                p(sum<X>) :- p(X).
+            ";
+            let rules = get_rules(program)?;
+            let err = stratify_rules(rules.clone()).unwrap_err();
+            assert!(err.to_string().contains("cycle that contains a aggregated"));
         }
 
         Ok(())

@@ -28,6 +28,19 @@ import pytest
         },
         id="graph-unreachable",
     ),
+    pytest.param(
+        ["-f", "graph.pl", "-s", "summary(X,Count)?"],
+        {
+            "summary(x, 2)",
+            "summary(y, 1)",
+        },
+        id="graph-summary",
+    ),
+    pytest.param(
+        ["-f", "graph.pl", "-s", "num_nodes(Count)?"],
+        {"num_nodes(3)"},
+        id="graph-num_nodes",
+    ),
     ############################################################################
     # bare_rule.pl
     ############################################################################
@@ -45,6 +58,41 @@ import pytest
         ["-f", "bare_rule.pl", "-s", "all_fruits3(X)?"],
         set(),
         id="bare_rule-all_fruits3",
+    ),
+    ############################################################################
+    # products.pl
+    ############################################################################
+    pytest.param(
+        ["-f", "products.pl", "-s", "product_info_all_cities(Product,Sales,MinCost,MaxCost)?"],
+        {
+          'product_info_all_cities(groundhog_day, 232, 8, 11)',
+          'product_info_all_cities(space_odyssey, 979, 12, 18)',
+          'product_info_all_cities(total_recall, 404, 7, 7)',
+        },
+        id="products-product_info_all_cities",
+    ),
+    pytest.param(
+        ["-f", "products.pl", "-s", "product_info_by_city(Product,City,Sales,MinCost,MaxCost)?"],
+        {
+            'product_info_by_city(groundhog_day, la, 44, 11, 11)',
+            'product_info_by_city(groundhog_day, nyc, 61, 9, 9)',
+            'product_info_by_city(groundhog_day, philly, 127, 8, 8)',
+            'product_info_by_city(total_recall, la, 404, 7, 7)',
+            'product_info_by_city(space_odyssey, philly, 103, 12, 18)',
+            'product_info_by_city(space_odyssey, nyc, 77, 14, 14)',
+            'product_info_by_city(space_odyssey, la, 799, 13, 13)',
+        },
+        id="products-product_info_by_city",
+    ),
+    pytest.param(
+        ["-f", "products.pl", "-s", "num_products(Count)?"],
+        {'num_products(3)'},
+        id="products-num_products",
+    ),
+    pytest.param(
+        ["-f", "products.pl", "-s", "total_sales(Count)?"],
+        {'total_sales(1615)'},
+        id="products-total_sales",
     ),
 ])
 def test_recall_cli(args, expected):

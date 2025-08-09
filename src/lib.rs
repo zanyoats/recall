@@ -42,7 +42,7 @@ impl From<ParameterType> for Term {
         match p {
             ParameterType::Atom(s) => Term::Atom(s),
             ParameterType::Str(s) => Term::Str(s),
-            ParameterType::Int(i) => Term::Integer(i),
+            ParameterType::Int(i) => Term::Int(i),
             _ => unreachable!(),
         }
     }
@@ -53,7 +53,7 @@ impl From<&Term> for ParameterType {
         match t {
             Term::Atom(s) => ParameterType::Atom(s.to_string()),
             Term::Str(s) => ParameterType::Str(s.to_string()),
-            Term::Integer(i) => ParameterType::Int(*i),
+            Term::Int(i) => ParameterType::Int(*i),
             _ => unreachable!(),
         }
     }
@@ -74,7 +74,8 @@ impl fmt::Display for Term {
                     .replace("\0", "\\0")
             ),
             Term::Var(value) => write!(f, "{}", value),
-            Term::Integer(value) => write!(f, "{}", value),
+            Term::AggVar(func, var) => write!(f, "{}<{}>", func, var),
+            Term::Int(value) => write!(f, "{}", value),
             Term::Functor(name, terms, negated) => {
                 if *negated {
                     write!(f, "not ")?;

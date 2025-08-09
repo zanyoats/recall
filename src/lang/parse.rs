@@ -64,7 +64,8 @@ pub enum Term {
     Atom(String),
     Str(String),
     Var(String),
-    Integer(i32),
+    AggVar(String, String),
+    Int(i32),
     /// Grammar does not allow functor terms (at the moment). But this
     /// is still useful for packaging functor terms into literals since
     /// unification works on terms.
@@ -111,6 +112,44 @@ impl Term {
             unreachable!()
         }
     }
+
+    pub fn functor_aggregated(&self) -> bool {
+        self
+        .functor_args()
+        .iter()
+        .any(|arg| match arg {
+            Term::AggVar(_, _) => true,
+            _ => false,
+        })
+    }
+
+    pub fn functor_agg_vars(&self) -> Vec<(&str, &str)> {
+        let mut result = vec![];
+        for arg in self.functor_args().iter() {
+            match arg {
+                Term::AggVar(fun, s) => result.push((fun.as_str(), s.as_str())),
+                _ => continue,
+            }
+        }
+        result
+    }
+
+    pub fn functor_partition_head_vars(&self) -> (Vec<&str>, Vec<&str>) {
+        let mut pivots = vec![];
+        let mut grouped = vec![];
+        for arg in self.functor_args().iter() {
+            match arg {
+                Term::Var(s) => pivots.push(s.as_str()),
+                Term::AggVar(_, s) => {
+                    if !grouped.contains(&s.as_str()) {
+                        grouped.push(s.as_str());
+                    }
+                },
+                _ => continue
+            }
+        }
+        (pivots, grouped)
+    }
 }
 
 pub struct Parser<'a> {
@@ -135,7 +174,7 @@ impl<'a> Parser<'a> {
 /// <literal>       ::= | <atom> [ "(" [ <terms> ] ")" ]
 ///                     | <str> [ "(" [ <terms> ] ")" ]
 /// <terms>         ::= <term> { "," <term> }
-/// <term>          ::= | <atom>
+/// <term>          ::= | <atom> [ "<" <var> ">" ]
 ///                     | <str>
 ///                     | <var>
 ///                     | [ "+" | "-" ] <integer>
@@ -220,8 +259,8 @@ fn parse_body<'a>(parser: &'a mut Parser) -> Result<Vec<FunctorTerm>, anyhow::Er
 fn parse_literal<'a>(parser: &'a mut Parser, negated: bool) -> Result<FunctorTerm, anyhow::Error> {
     let name = match parse_term(parser)? {
         Term::Atom(s) | Term::Str(s) => s,
-        _ => return Err(RecallError::ParseError(format!(
-            "head position of literal needs to be an atom or str term",
+        term => return Err(RecallError::ParseError(format!(
+            "head position of literal needs to be an atom or str term, got {}", term,
         )).into()),
     };
     let args =
@@ -256,15 +295,32 @@ fn parse_terms<'a>(parser: &'a mut Parser) -> Result<Vec<Term>, anyhow::Error> {
 
 fn parse_term<'a>(parser: &'a mut Parser) -> Result<Term, anyhow::Error> {
     match parser.scanner.next_token()? {
-        Token::Atom(s) => Ok(Term::Atom(s)),
+        Token::Atom(s) => {
+            if let Token::LT = parser.scanner.peek_token()? {
+                expect_token(parser, Token::LT)?;
+
+                let token = parser.scanner.next_token()?;
+
+                if let Token::Var(s2) = token {
+                    expect_token(parser, Token::GT)?;
+                    Ok(Term::AggVar(s, s2))
+                } else {
+                    Err(RecallError::ParseError(format!(
+                        "expected variable term but got '{}'", token,
+                    )).into())
+                }
+            } else {
+                Ok(Term::Atom(s))
+            }
+        },
         Token::Str(s) => Ok(Term::Str(s)),
         Token::Var(s) => Ok(Term::Var(s)),
-        Token::Integer(n) => Ok(Term::Integer(n)),
+        Token::Integer(n) => Ok(Term::Int(n)),
         Token::Plus => {
             let token = parser.scanner.next_token()?;
 
             if let Token::Integer(n) = token {
-                Ok(Term::Integer(n))
+                Ok(Term::Int(n))
             } else {
                 Err(RecallError::ParseError(format!(
                     "expected integer term but got '{}'", token,
@@ -275,7 +331,7 @@ fn parse_term<'a>(parser: &'a mut Parser) -> Result<Term, anyhow::Error> {
             let token = parser.scanner.next_token()?;
 
             if let Token::Integer(n) = token {
-                Ok(Term::Integer(-n))
+                Ok(Term::Int(-n))
             } else {
                 Err(RecallError::ParseError(format!(
                     "expected integer term but got '{}'", token,
@@ -305,7 +361,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_parses_valid_program() {
+    fn it_parses_valid_program() -> Result<(), anyhow::Error> {
         let program = "
             # example program
             #! link(atom, atom).
@@ -319,15 +375,13 @@ mod tests {
             same(X)?
             same(a) :- link(a,a)!
             same(X)?
+            person(alice).
+            person(bob).
+            num_people(count<X>) :- person(X).
         ";
         let scanner = Scanner::new(program);
         let mut parser = Parser::new(scanner);
-        let result = parse_program(&mut parser);
-        assert!(result.is_ok());
-        // if result.is_ok() {
-        //     println!("{:?}", result.unwrap());
-        // } else {
-        //     println!("{:?}", result.unwrap_err());
-        // }
+        parse_program(&mut parser)?;
+        Ok(())
     }
 }

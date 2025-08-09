@@ -3,6 +3,34 @@ use std::collections::HashMap;
 use crate::lang::parse::Term;
 
 pub type Bindings<'a> = HashMap<&'a str, &'a Term>;
+pub type BindingPair<'a> = (&'a str, &'a Term);
+pub type BindingPairs<'a> = Vec<BindingPair<'a>>;
+
+pub fn from_binding_pairs<'a>(pairs: BindingPairs<'a>) -> Bindings<'a> {
+    let mut bindings = HashMap::new();
+
+    for (x, term) in pairs {
+        insert_binding(x, term, &mut bindings);
+    }
+
+    bindings
+}
+
+pub fn select_bindings<'a>(
+    bindings: &Bindings<'a>,
+    by_vars: &Vec<&'a str>,
+) -> BindingPairs<'a> {
+    by_vars
+    .into_iter()
+    .filter_map(|&var| {
+        if let Some(&term) = bindings.get(var) {
+            Some((var, term))
+        } else {
+            None
+        }
+    })
+    .collect()
+}
 
 pub fn unify<'a>(t0: &'a Term, t1: &'a Term) -> Option<Bindings<'a>> {
     unify_with_bindings(t0, t1, HashMap::new())
@@ -57,8 +85,10 @@ fn unify_terms<'a>(t0: &'a Term, t1: &'a Term, bindings: &mut Bindings<'a>) -> b
             x == y,
         (Str(x), Str(y)) =>
             x == y,
-        (Integer(x), Integer(y)) =>
+        (Int(x), Int(y)) =>
             x == y,
+        (AggVar(func1, _), AggVar(func2, _)) =>
+            func1 == func2,
         (Var(x), _) =>
             unify_var(x, t1, bindings),
         (_, Var(y)) =>
@@ -170,8 +200,16 @@ mod tests {
 
         {
             let mut bindings = HashMap::new();
-            let t1 = Integer(42);
-            let t2 = Integer(42);
+            let t1 = Int(42);
+            let t2 = Int(42);
+            assert!(unify_terms(&t1, &t2, &mut bindings));
+            assert!(bindings.is_empty());
+        }
+
+        {
+            let mut bindings = HashMap::new();
+            let t1 = AggVar("count".to_string(), "X".to_string());
+            let t2 = AggVar("count".to_string(), "Y".to_string());
             assert!(unify_terms(&t1, &t2, &mut bindings));
             assert!(bindings.is_empty());
         }
@@ -197,8 +235,8 @@ mod tests {
     fn it_fails_to_unify_terms() {
         {
             let mut bindings = HashMap::new();
-            let t1 = Integer(42);
-            let t2 = Integer(69);
+            let t1 = Int(42);
+            let t2 = Int(69);
             assert!(!unify_terms(&t1, &t2, &mut bindings));
         }
 
@@ -206,6 +244,13 @@ mod tests {
             let mut bindings = HashMap::new();
             let t1 = Atom("foo".to_string());
             let t2 = Atom("bar".to_string());
+            assert!(!unify_terms(&t1, &t2, &mut bindings));
+        }
+
+        {
+            let mut bindings = HashMap::new();
+            let t1 = AggVar("min".to_string(), "X".to_string());
+            let t2 = AggVar("max".to_string(), "Y".to_string());
             assert!(!unify_terms(&t1, &t2, &mut bindings));
         }
 
@@ -374,7 +419,7 @@ mod tests {
                 Var("X".to_string()),
                 Var("Y".to_string()),
                 Var("Z".to_string()),
-                Integer(42),
+                Int(42),
                 Var("U".to_string()),
                 Var("V".to_string()),
             ],
@@ -386,7 +431,7 @@ mod tests {
                 Var("Y".to_string()),
                 Var("Z".to_string()),
                 Atom("foo".to_string()),
-                Integer(42),
+                Int(42),
                 Var("V".to_string()),
                 Var("U".to_string()),
             ],
@@ -402,7 +447,7 @@ mod tests {
                 && matches!(&args[0], Atom(val) if val == "foo")
                 && matches!(&args[1], Atom(val) if val == "foo")
                 && matches!(&args[2], Atom(val) if val == "foo")
-                && matches!(&args[3], Integer(val) if *val == 42)
+                && matches!(&args[3], Int(val) if *val == 42)
                 && matches!(&args[4], Var(val) if val == "V")
                 && matches!(&args[5], Var(val) if val == "V")
         ));

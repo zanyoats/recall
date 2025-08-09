@@ -8,7 +8,7 @@ use crate::lang::parse::Parser;
 use crate::lang::parse::Term;
 use crate::lang::parse::Literal;
 use crate::lang::parse::FunctorTerm;
-use crate::lang::unify::Bindings;
+use crate::lang::unify::{Bindings, BindingPairs};
 use crate::lang::unify;
 use crate::lang::analysis;
 use crate::eval::QueryEvaluator;
@@ -219,7 +219,7 @@ fn eval_query(
     // iterate until fixpoint: condition when no new facts are learnt
     for (i, stratum) in strata.iter().enumerate() {
         if crate::get_verbose() {
-            println!("INFO: stratum/{}", i);
+            eprintln!("INFO: stratum/{}", i);
         }
 
         let mut j: i32 = 0;
@@ -260,12 +260,146 @@ fn can_halt_iterations<'a>(
         rules
         .iter()
         .flat_map(|rule| {
-            eval_rule(rule, learned)
-            .into_iter()
-            .map(|bindings| {
-                unify::substitute_bindings(&rule.head, &bindings)
-            })
-            .collect::<Vec<FunctorTerm>>()
+            let (pivot_vars, agg_vars) = rule.head.functor_partition_head_vars();
+
+            if agg_vars.is_empty() {
+                eval_rule(rule, learned)
+                .into_iter()
+                .map(|bindings| {
+                    unify::substitute_bindings(&rule.head, &bindings)
+                })
+                .collect::<Vec<FunctorTerm>>()
+            } else {
+                let mut functors = vec![];
+
+                let mut grouped: HashMap<BindingPairs, Vec<BindingPairs>> = HashMap::new();
+
+                for bindings in eval_rule(rule, learned) {
+                    let pivot =
+                        unify::select_bindings(&bindings, &pivot_vars);
+                    let agg =
+                        unify::select_bindings(&bindings, &agg_vars);
+                    let grouping =
+                        grouped
+                        .entry(pivot)
+                        .or_insert(vec![]);
+
+                    grouping.push(agg);
+                }
+
+                for (pivot, agg) in grouped {
+                    let mut pairs = pivot.clone();
+                    let mut evaluated: Vec<(String, Term)> = vec![];
+
+                    for (fun, var) in rule.head.functor_agg_vars() {
+                        match fun {
+                            "count" => {
+                                let result = agg.len();
+                                evaluated.push((
+                                    format!("{}_{}", var, fun),
+                                    Term::Int(result.try_into().unwrap(),
+                                )));
+                            },
+                            "sum" => {
+                                let result =
+                                    agg
+                                    .iter()
+                                    .fold(0, |acc, pairs| {
+                                        let pair =
+                                            pairs
+                                            .iter()
+                                            .find(|&pair| pair.0 == var)
+                                            .unwrap();
+                                        let term = pair.1;
+                                        match term {
+                                            Term::Int(n) => acc + *n,
+                                            _ => unreachable!(),
+                                        }
+                                    });
+                                evaluated.push((
+                                    format!("{}_{}", var, fun),
+                                    Term::Int(result.try_into().unwrap(),
+                                )));
+                            },
+                            "min" => {
+                                let result =
+                                    agg
+                                    .iter()
+                                    .map(|pairs| {
+                                        let pair =
+                                                    pairs
+                                                    .iter()
+                                                    .find(|&pair| pair.0 == var)
+                                                    .unwrap();
+                                        let term = pair.1;
+                                        match term {
+                                            Term::Int(n) => *n,
+                                            _ => unreachable!(),
+                                        }
+                                    })
+                                    .min()
+                                    .unwrap();
+                                evaluated.push((
+                                    format!("{}_{}", var, fun),
+                                    Term::Int(result.try_into().unwrap(),
+                                )));
+                            },
+                            "max" => {
+                                let result =
+                                    agg
+                                    .iter()
+                                    .map(|pairs| {
+                                        let pair =
+                                                    pairs
+                                                    .iter()
+                                                    .find(|&pair| pair.0 == var)
+                                                    .unwrap();
+                                        let term = pair.1;
+                                        match term {
+                                            Term::Int(n) => *n,
+                                            _ => unreachable!(),
+                                        }
+                                    })
+                                    .max()
+                                    .unwrap();
+                                evaluated.push((
+                                    format!("{}_{}", var, fun),
+                                    Term::Int(result.try_into().unwrap(),
+                                )));
+                            },
+                            _ => unreachable!(),
+                        }
+                    }
+
+                    for (var, term) in evaluated.iter() {
+                        pairs.push((var.as_str(), term));
+                    }
+
+                    let final_bindings = unify::from_binding_pairs(pairs);
+
+                    // rewrite agg vars in rule head to regular vars
+                    let rewritten_head =
+                        Term::Functor(
+                            rule.head.functor_name().to_string(),
+                            rule
+                            .head
+                            .functor_args()
+                            .iter()
+                            .map(|arg| match arg {
+                                Term::AggVar(fun, var) =>
+                                    Term::Var(format!("{}_{}", var, fun)),
+                                term =>
+                                    term.clone(),
+                            })
+                            .collect(),
+                            false,
+                        );
+
+                    functors.push(unify::substitute_bindings(&rewritten_head, &final_bindings));
+                }
+
+                functors
+            }
         })
         .collect();
 
@@ -425,6 +559,7 @@ mod tests {
         assert_eq!(facts.len(), 4);
         assert_eq!(rules.len(), 1);
         assert_eq!(queries.len(), 2);
+
         let result =
             eval_query(&queries[0], &vec![rules.clone()], facts.clone())
             .collect::<HashSet<FunctorTerm>>();
@@ -443,5 +578,93 @@ mod tests {
         assert_eq!(result, HashSet::from_iter(vec![
             Term::Functor("same".to_string(), vec![Term::Atom("c".to_string())], false),
         ].into_iter()));
+    }
+
+    #[test]
+    fn it_evals_datalog_aggregation() {
+        let mut facts = vec![];
+        let mut rules = vec![];
+        let mut queries = vec![];
+
+        let program = "
+            person(alice).
+            person(bob).
+
+            sales(dvd, philly, 12, 42).
+            sales(dvd, nyc, 13, 69).
+            sales(computer, la, 2300, 1337).
+        ";
+        let scanner = Scanner::new(program);
+        let mut parser = Parser::new(scanner);
+        let program = parse_program(&mut parser);
+        let program = program.unwrap();
+
+        for stmt in program.statements.into_iter() {
+            match stmt {
+                Statement::Assertion(stmt) => {
+                    facts.push(stmt.head);
+                },
+                _ => unreachable!(),
+            }
+        }
+
+        let program = "
+            num_people(count<X>) :- person(X).
+            sales_by_product(Product, sum<Sales>) :- sales(Product, City, Cost, Sales).
+            product_info_all_cities(Product, min<Cost>, max<Cost>) :- sales(Product, City, Cost, Sales).
+
+            num_people(N)?
+            sales_by_product(Product, Num_Sales)?
+            product_info_all_cities(Product, Min_Cost, Max_Cost)?
+
+        ";
+        let scanner = Scanner::new(program);
+        let mut parser = Parser::new(scanner);
+        let program = parse_program(&mut parser);
+        let program = program.unwrap();
+
+        for stmt in program.statements.into_iter() {
+            match stmt {
+                Statement::Query(stmt) => {
+                    queries.push(stmt)
+                },
+                Statement::Assertion(stmt) => {
+                    rules.push(stmt);
+                },
+                _ => unreachable!(),
+            }
+        }
+
+        assert_eq!(facts.len(), 5);
+        assert_eq!(rules.len(), 3);
+        assert_eq!(queries.len(), 3);
+
+        let result =
+            eval_query(&queries[0], &vec![rules.clone()], facts.clone())
+            .collect::<HashSet<FunctorTerm>>();
+
+        assert_eq!(result, HashSet::from_iter(vec![
+            Term::Functor("num_people".to_string(), vec![Term::Int(2)], false),
+        ].into_iter()));
+
+        let result =
+            eval_query(&queries[1], &vec![rules.clone()], facts.clone())
+            .collect::<HashSet<FunctorTerm>>();
+
+        assert_eq!(result, HashSet::from_iter(vec![
+            Term::Functor("sales_by_product".to_string(), vec![Term::Atom("computer".to_string()), Term::Int(1337)], false),
+            Term::Functor("sales_by_product".to_string(), vec![Term::Atom("dvd".to_string()), Term::Int(111)], false),
+        ].into_iter()));
+
+        let result =
+            eval_query(&queries[2], &vec![rules.clone()], facts.clone())
+            .collect::<HashSet<FunctorTerm>>();
+
+        assert_eq!(result, HashSet::from_iter(vec![
+            Term::Functor("product_info_all_cities".to_string(), vec![Term::Atom("computer".to_string()), Term::Int(2300), Term::Int(2300)], false),
+            Term::Functor("product_info_all_cities".to_string(), vec![Term::Atom("dvd".to_string()), Term::Int(12), Term::Int(13)], false),
+        ].into_iter()));
+
+        // println!("result {result:?}");
     }
 }

@@ -24,6 +24,8 @@ pub enum Token {
     Minus,
     LP,
     RP,
+    LT,
+    GT,
     Decl,
     /* keywords */
     Not,
@@ -53,6 +55,8 @@ impl PartialEq for Token {
             | (Minus, Minus)
             | (LP, LP)
             | (RP, RP)
+            | (LT, LT)
+            | (GT, GT)
             | (End, End) => true,
             // every other case
             _ => false,
@@ -84,6 +88,8 @@ impl fmt::Display for Token {
             Minus       => write!(f, "-"),
             LP          => write!(f, "("),
             RP          => write!(f, ")"),
+            LT          => write!(f, "<"),
+            GT          => write!(f, ">"),
             /* keywords */
             Not         => write!(f, "not"),
             /* end of file */
@@ -134,6 +140,8 @@ impl<'a> Scanner<'a> {
                 '-' => return Ok(Minus),
                 '(' => return Ok(LP),
                 ')' => return Ok(RP),
+                '<' => return Ok(LT),
+                '>' => return Ok(GT),
                 ':' => {
                     if let Some('-') = self.iterable.peek() {
                         self.iterable.next();

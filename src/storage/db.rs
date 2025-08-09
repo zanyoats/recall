@@ -1022,17 +1022,17 @@ mod tests {
             assert_eq!(HashSet::from([
                 (0, Term::Functor(
                     "foo".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(0)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(0)],
                     false,
                 )),
                 (1, Term::Functor(
                     "foo".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(1)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(1)],
                     false,
                 )),
                 (2, Term::Functor(
                     "foo".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(2)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(2)],
                     false,
                 )),
             ]), result);
@@ -1050,7 +1050,7 @@ mod tests {
             assert_eq!(HashSet::from([
                 (1, Term::Functor(
                     "foo".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(1)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(1)],
                     false,
                 )),
             ]), result);
@@ -1079,22 +1079,22 @@ mod tests {
             assert_eq!(HashSet::from([
                 (0, Term::Functor(
                     "foo".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(0)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(0)],
                     false,
                 )),
                 (1, Term::Functor(
                     "foo".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(1)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(1)],
                     false,
                 )),
                 (2, Term::Functor(
                     "foo".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(2)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(2)],
                     false,
                 )),
                 (3, Term::Functor(
                     "bar".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(42)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(42)],
                     false,
                 )),
             ]), result);
@@ -1151,17 +1151,17 @@ mod tests {
             assert_eq!(HashSet::from([
                 (0, Term::Functor(
                     "foo".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(0)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(0)],
                     false,
                 )),
                 (1, Term::Functor(
                     "foo".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(1)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(1)],
                     false,
                 )),
                 (2, Term::Functor(
                     "foo".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(2)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(2)],
                     false,
                 )),
             ]), result);
@@ -1186,12 +1186,12 @@ mod tests {
             assert_eq!(HashSet::from([
                 (0, Term::Functor(
                     "foo".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(0)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(0)],
                     false,
                 )),
                 (2, Term::Functor(
                     "foo".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(2)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(2)],
                     false,
                 )),
             ]), result);
@@ -1286,17 +1286,17 @@ mod tests {
             assert_eq!(result, HashSet::from([
                 (0, Term::Functor(
                     "foo".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(0)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(0)],
                     false,
                 )),
                 (1, Term::Functor(
                     "foo".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(1)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(1)],
                     false,
                 )),
                 (2, Term::Functor(
                     "foo".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(2)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(2)],
                     false,
                 )),
             ]));
@@ -1339,17 +1339,17 @@ mod tests {
             assert_eq!(result, HashSet::from([
                 (0, Term::Functor(
                     "foo".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(0)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(0)],
                     false,
                 )),
                 (1, Term::Functor(
                     "foo".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(1)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(1)],
                     false,
                 )),
                 (2, Term::Functor(
                     "foo".to_string(),
-                    vec![Term::Atom("apple".to_string()), Term::Integer(2)],
+                    vec![Term::Atom("apple".to_string()), Term::Int(2)],
                     false,
                 )),
             ]));
