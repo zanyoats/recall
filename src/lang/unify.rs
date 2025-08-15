@@ -2,29 +2,29 @@ use std::collections::HashMap;
 
 use crate::lang::parse::Term;
 
-pub type Bindings<'a> = HashMap<&'a str, &'a Term>;
-pub type BindingPair<'a> = (&'a str, &'a Term);
-pub type BindingPairs<'a> = Vec<BindingPair<'a>>;
+pub type Bindings = HashMap<String, Term>;
+pub type BindingPair = (String, Term);
+pub type BindingPairs = Vec<BindingPair>;
 
-pub fn from_binding_pairs<'a>(pairs: BindingPairs<'a>) -> Bindings<'a> {
+pub fn from_binding_pairs(pairs: BindingPairs) -> Bindings {
     let mut bindings = HashMap::new();
 
     for (x, term) in pairs {
-        insert_binding(x, term, &mut bindings);
+        insert_binding(&x, &term, &mut bindings);
     }
 
     bindings
 }
 
-pub fn select_bindings<'a>(
-    bindings: &Bindings<'a>,
-    by_vars: &Vec<&'a str>,
-) -> BindingPairs<'a> {
+pub fn select_bindings(
+    bindings: &Bindings,
+    by_vars: &Vec<&str>,
+) -> BindingPairs {
     by_vars
     .into_iter()
-    .filter_map(|&var| {
-        if let Some(&term) = bindings.get(var) {
-            Some((var, term))
+    .filter_map(|&x| {
+        if let Some(term) = lookup(x, bindings) {
+            Some((x.to_string(), term))
         } else {
             None
         }
@@ -32,15 +32,15 @@ pub fn select_bindings<'a>(
     .collect()
 }
 
-pub fn unify<'a>(t0: &'a Term, t1: &'a Term) -> Option<Bindings<'a>> {
+pub fn unify(t0: &Term, t1: &Term) -> Option<Bindings> {
     unify_with_bindings(t0, t1, HashMap::new())
 }
 
-pub fn unify_with_bindings<'a>(
-    t0: &'a Term,
-    t1: &'a Term,
-    mut bindings: Bindings<'a>,
-) -> Option<Bindings<'a>> {
+pub fn unify_with_bindings(
+    t0: &Term,
+    t1: &Term,
+    mut bindings: Bindings,
+) -> Option<Bindings> {
     if unify_terms(t0, t1, &mut bindings) {
         Some(bindings)
     } else {
@@ -48,7 +48,7 @@ pub fn unify_with_bindings<'a>(
     }
 }
 
-pub fn substitute_bindings<'a>(term: &'a Term, bindings: &Bindings<'a>) -> Term {
+pub fn substitute_bindings(term: &Term, bindings: &Bindings) -> Term {
     use Term::*;
 
     match term {
@@ -71,13 +71,13 @@ pub fn substitute_bindings<'a>(term: &'a Term, bindings: &Bindings<'a>) -> Term 
     }
 }
 
-fn lookup<'a>(var_name: &str, bindings: &Bindings<'a>) -> Option<&'a Term> {
+fn lookup(x: &str, bindings: &Bindings) -> Option<Term> {
     bindings
-    .get(var_name)
-    .map(|&bound| bound)
+    .get(x)
+    .cloned()
 }
 
-fn unify_terms<'a>(t0: &'a Term, t1: &'a Term, bindings: &mut Bindings<'a>) -> bool {
+fn unify_terms(t0: &Term, t1: &Term, bindings: &mut Bindings) -> bool {
     use Term::*;
 
     match (t0, t1) {
@@ -104,19 +104,19 @@ fn unify_terms<'a>(t0: &'a Term, t1: &'a Term, bindings: &mut Bindings<'a>) -> b
     }
 }
 
-fn unify_var<'a>(
-    x: &'a str,
-    term: &'a Term,
-    bindings: &mut Bindings<'a>
+fn unify_var(
+    x: &str,
+    term: &Term,
+    bindings: &mut Bindings
 ) -> bool {
-    match bindings.get(x) {
-        Some(&bound) => unify_terms(bound, term, bindings),
+    match lookup(x, bindings) {
+        Some(bound) => unify_terms(&bound, term, bindings),
         None => {
             match term {
                 Term::Var(y) if x == y => true,
                 Term::Var(y) => {
-                    match bindings.get(y.as_str()) {
-                        Some(&bound) => unify_var(x, bound, bindings),
+                    match lookup(y, bindings) {
+                        Some(bound) => unify_var(x, &bound, bindings),
                         None => insert_binding(x, term, bindings),
                     }
                 }
@@ -132,25 +132,25 @@ fn unify_var<'a>(
     }
 }
 
-fn insert_binding<'a>(
-    x: &'a str,
-    term: &'a Term,
-    bindings: &mut Bindings<'a>
+fn insert_binding(
+    x: &str,
+    term: &Term,
+    bindings: &mut Bindings
 ) -> bool {
-    bindings.insert(x, term);
+    bindings.insert(x.to_string(), term.clone());
     true
 }
 
-fn occurs_check<'a>(
-    x: &'a str,
-    term: &'a Term,
-    bindings: &mut Bindings<'a>
+fn occurs_check(
+    x: &str,
+    term: &Term,
+    bindings: &mut Bindings
 ) -> bool {
     match term {
         Term::Var(y) if x == y => true,
         Term::Var(y) => {
-            match bindings.get(y.as_str()) {
-                Some(term) => occurs_check(x, term, bindings),
+            match lookup(y, bindings) {
+                Some(term) => occurs_check(x, &term, bindings),
                 None => false,
             }
         }

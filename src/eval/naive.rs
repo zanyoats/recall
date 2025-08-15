@@ -310,9 +310,9 @@ fn can_halt_iterations<'a>(
                                             .iter()
                                             .find(|&pair| pair.0 == var)
                                             .unwrap();
-                                        let term = pair.1;
+                                        let term = pair.1.clone();
                                         match term {
-                                            Term::Int(n) => acc + *n,
+                                            Term::Int(n) => acc + n,
                                             _ => unreachable!(),
                                         }
                                     });
@@ -331,9 +331,9 @@ fn can_halt_iterations<'a>(
                                                     .iter()
                                                     .find(|&pair| pair.0 == var)
                                                     .unwrap();
-                                        let term = pair.1;
+                                        let term = pair.1.clone();
                                         match term {
-                                            Term::Int(n) => *n,
+                                            Term::Int(n) => n,
                                             _ => unreachable!(),
                                         }
                                     })
@@ -354,9 +354,9 @@ fn can_halt_iterations<'a>(
                                                     .iter()
                                                     .find(|&pair| pair.0 == var)
                                                     .unwrap();
-                                        let term = pair.1;
+                                        let term = pair.1.clone();
                                         match term {
-                                            Term::Int(n) => *n,
+                                            Term::Int(n) => n,
                                             _ => unreachable!(),
                                         }
                                     })
@@ -371,8 +371,8 @@ fn can_halt_iterations<'a>(
                         }
                     }
 
-                    for (var, term) in evaluated.iter() {
-                        pairs.push((var.as_str(), term));
+                    for (var, term) in evaluated.into_iter() {
+                        pairs.push((var, term));
                     }
 
                     let final_bindings = unify::from_binding_pairs(pairs);
@@ -426,18 +426,18 @@ fn can_halt_iterations<'a>(
     halt
 }
 
-fn eval_rule<'a>(
-    rule: &'a Literal,
-    learned: &'a HashSet<FunctorTerm>,
-) -> Vec<Bindings<'a>> {
+fn eval_rule(
+    rule: &Literal,
+    learned: &HashSet<FunctorTerm>,
+) -> Vec<Bindings> {
     eval_and(&rule.body[..], learned, None)
 }
 
-fn eval_and<'a>(
-    predicates: &'a[FunctorTerm],
-    learned: &'a HashSet<FunctorTerm>,
-    env: Option<Bindings<'a>>,
-) -> Vec<Bindings<'a>> {
+fn eval_and(
+    predicates: &[FunctorTerm],
+    learned: &HashSet<FunctorTerm>,
+    env: Option<Bindings>,
+) -> Vec<Bindings> {
     match predicates.first() {
         Some(predicate) =>
             eval_predicate(predicate, learned, env)
@@ -455,11 +455,11 @@ fn eval_and<'a>(
     }
 }
 
-fn eval_predicate<'a>(
-    predicate0: &'a FunctorTerm,
-    learned: &'a HashSet<FunctorTerm>,
-    env: Option<Bindings<'a>>,
-) -> Vec<Bindings<'a>> {
+fn eval_predicate(
+    predicate0: &FunctorTerm,
+    learned: &HashSet<FunctorTerm>,
+    env: Option<Bindings>,
+) -> Vec<Bindings> {
     if predicate0.functor_negated() {
         let found =
             learned
