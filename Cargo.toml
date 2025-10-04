@@ -9,3 +9,6 @@ rustyline = "16.0.0"
 crossterm = "0.26"
 thiserror = "2"
 anyhow = "1.0"
+toml = { version = "0.9.5", features = ["serde"] }
+serde = { version = "1.0.219", features = ["derive"] }
+bincode = { version = "2.0.1", features = ["serde"] }

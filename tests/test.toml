@@ -1,0 +1,19 @@
+db = "test"
+
+[declare.link]
+doc = "a single edge in a graph"
+indexes = [
+  ["l_vertex", "r_vertex"],
+  ["r_vertex"]
+]
+
+[[declare.link.args]]
+l_vertex = "atom"
+
+[[declare.link.args]]
+r_vertex = "atom"
+
+[declare.fruit]
+
+[[declare.fruit.args]]
+name = "atom"

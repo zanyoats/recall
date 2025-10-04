@@ -1,39 +1,28 @@
-use std::fs;
 use std::env;
-use std::path::PathBuf;
+use std::fs;
 use std::io::{stdout, Write};
+use std::path::PathBuf;
 
-use anyhow::{Context, bail};
-use rustyline::error::ReadlineError;
-use rustyline::{DefaultEditor};
+use anyhow::{bail, Context};
 use crossterm::{
     event::{read, Event, KeyCode, KeyEvent, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode},
 };
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
 
-use recall::lang::scan::Scanner;
+use recall::eval;
+use recall::lang::analysis;
+use recall::lang::parse::parse_program;
 use recall::lang::parse::Parser;
 use recall::lang::parse::TypedProgram;
-use recall::lang::parse::parse_program;
-use recall::lang::analysis;
-use recall::eval;
+use recall::lang::scan::Scanner;
 use recall::storage::db::DB;
-
-#[derive(Debug)]
-struct Config {
-    name: String,
-    h: bool,
-    v: bool,
-    c: bool,
-    i: bool,
-    program: String,
-    db: Option<PathBuf>,
-}
+use recall::Config;
+use recall::DeclRoot;
 
 fn main() {
-    let result =
-        parse_config(std::env::args().peekable())
-        .and_then(run);
+    let result = parse_config(std::env::args().peekable()).and_then(run);
 
     if let Err(err) = result {
         eprintln!("{:#}", err);
@@ -42,29 +31,45 @@ fn main() {
 }
 
 fn parse_config(mut iter: impl Iterator<Item = String>) -> Result<Config, anyhow::Error> {
-    let name =
-        iter
-        .next()
-        .unwrap();
+    let name = iter.next().unwrap();
 
     let mut result = Config {
-        name, h: false, c: false, v: false, i: false, program: String::new(), db: None,
+        name,
+        h: false,
+        c: false,
+        v: false,
+        i: false,
+        declaration: None,
+        program: String::new(),
+        db: None,
     };
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "-h" | "--help" => {
                 result.h = true;
-            },
+            }
             "-v" => {
                 result.v = true;
-            },
+            }
             "-c" => {
                 result.c = true;
-            },
+            }
             "-i" => {
                 result.i = true;
-            },
+            }
+            "-d" => {
+                if let Some(path) = iter.next() {
+                    let s = fs::read_to_string(&path)
+                        .with_context(|| format!("failed to read {}", path))?;
+                    let r: DeclRoot = toml::from_str(&s)
+                        .with_context(|| format!("failed to parse TOML file {}", path))?;
+
+                    result.declaration = Some(r);
+                } else {
+                    bail!("expected declaration config (TOML) file after '-d'");
+                }
+            }
             "-f" => {
                 if let Some(path) = iter.next() {
                     let s = fs::read_to_string(&path)
@@ -74,24 +79,28 @@ fn parse_config(mut iter: impl Iterator<Item = String>) -> Result<Config, anyhow
                 } else {
                     bail!("expected program text file after '-f'");
                 }
-            },
+            }
             "-s" => {
                 if let Some(s) = iter.next() {
                     result.program.push_str(&s);
                 } else {
                     bail!("expected program snippet after '-s'")
                 }
-            },
+            }
             other if other.starts_with('-') => {
                 bail!("unknown flag '{}'\n\n{}", other, help(&result.name));
-            },
+            }
             positional => {
                 if result.db.is_none() {
                     result.db = Some(PathBuf::from(positional));
                 } else {
-                    bail!("extra positional argument '{}'\n\n{}", positional, help(&result.name))
+                    bail!(
+                        "extra positional argument '{}'\n\n{}",
+                        positional,
+                        help(&result.name)
+                    )
                 }
-            },
+            }
         }
     }
 
@@ -101,7 +110,7 @@ fn parse_config(mut iter: impl Iterator<Item = String>) -> Result<Config, anyhow
 fn run(cfg: Config) -> Result<(), anyhow::Error> {
     if cfg.h {
         println!("{}", help(&cfg.name));
-        return Ok(())
+        return Ok(());
     }
 
     if cfg.v {
@@ -109,12 +118,12 @@ fn run(cfg: Config) -> Result<(), anyhow::Error> {
     }
 
     if cfg.program.is_empty() && cfg.c {
-        bail!("the check flag '-c' was used and no program(s) was(were) found")
+        bail!("the check flag '-c' was used and no program found")
     }
 
     if cfg.c {
         let _ = get_good_program(&cfg.program)?;
-        return Ok(())
+        return Ok(());
     }
 
     let db = if let Some(file_path) = cfg.db.as_ref() {
@@ -123,11 +132,30 @@ fn run(cfg: Config) -> Result<(), anyhow::Error> {
         DB::new_temp()?
     };
 
+    if let Some(root) = cfg.declaration {
+        let txn = db.begin_transaction();
+        match eval::eval_declarations(&txn, root) {
+            Ok(_) => txn.commit()?,
+            Err(e) => {
+                if let Err(e0) = txn.rollback() {
+                    eprintln!("NOTE: could not rollback transaction: {}", e0);
+                } else {
+                    eprintln!("NOTE: transaction rolled back for below error");
+                }
+                return Err(e.into());
+            }
+        }
+    }
+
     if cfg.i {
         let txn = db.begin_transaction();
-        txn.info()?;
-        txn.rollback()?;
-        return Ok(())
+        match txn.info() {
+            Ok(_) => {
+                txn.rollback()?;
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        }
     }
 
     if cfg.program.is_empty() {
@@ -151,26 +179,26 @@ fn get_good_program(program: &String) -> Result<TypedProgram, anyhow::Error> {
 
 fn run_batch(program_text: &String, db: DB) -> Result<(), anyhow::Error> {
     let txn = db.begin_transaction();
-    let naive_evaluator = eval::naive::NaiveEvaluator{};
-    let program = get_good_program(program_text)?;
-    let results = match eval::batch_eval(&program, &txn, naive_evaluator) {
-        Ok(results) => {
+    let answers = match {
+        get_good_program(program_text).and_then(|program| eval::batch_eval(program, &txn))
+    } {
+        Ok(answers) => {
             txn.commit()?;
-            results
-        },
+            answers
+        }
         Err(e) => {
             if let Err(e0) = txn.rollback() {
                 eprintln!("NOTE: could not rollback transaction: {}", e0);
             } else {
                 eprintln!("NOTE: transaction rolled back for below error");
             }
-            return Err(e.into())
-        },
+            return Err(e.into());
+        }
     };
-    results
-    .into_iter()
-    .for_each(|term| {
-        println!("{}", term);
+    answers.into_iter().for_each(|answer| {
+        answer.get_atoms().iter().for_each(|atom| {
+            println!("{}", atom);
+        });
     });
 
     Ok(())
@@ -190,7 +218,6 @@ fn run_repl(db: DB) -> Result<(), anyhow::Error> {
             .join(".cache")
             .join("recall")
             .join("history");
-
     } else {
         history_path = PathBuf::from("recall_history");
     }
@@ -199,7 +226,10 @@ fn run_repl(db: DB) -> Result<(), anyhow::Error> {
         fs::create_dir_all(dir)?;
     }
 
-    println!("History location: {}", history_path.to_str().unwrap_or("path not printable"));
+    println!(
+        "History location: {}",
+        history_path.to_str().unwrap_or("path not printable")
+    );
 
     if rl.load_history(&history_path).is_err() {
         // no previous history
@@ -220,26 +250,28 @@ fn run_repl(db: DB) -> Result<(), anyhow::Error> {
                     Ok(result) => result,
                     Err(err) => {
                         eprintln!("{}", err);
-                        continue 'toplevel
+                        continue 'toplevel;
                     }
                 };
                 let txn = db.begin_transaction();
-                let naive_evaluator = eval::naive::NaiveEvaluator{};
-                let mut iter = match eval::iter_eval(&program, &txn, naive_evaluator) {
-                    Ok(iter) => {
+                let answers = match eval::batch_eval(program, &txn) {
+                    Ok(results) => {
                         txn.commit()?;
-                        iter
-                    },
+                        results
+                    }
                     Err(e) => {
                         if let Err(e0) = txn.rollback() {
                             eprintln!("NOTE: could not rollback transaction: {}", e0);
                         }
                         eprintln!("{}", e);
-                        continue 'toplevel
-                    },
+                        continue 'toplevel;
+                    }
                 };
 
-                // iterate (possibly infinite (not at the moment)) results
+                let mut iter = answers
+                    .into_iter()
+                    .flat_map(|answer| answer.get_atoms().into_iter());
+
                 enable_raw_mode()?;
 
                 let mut seen = false;
@@ -255,48 +287,47 @@ fn run_repl(db: DB) -> Result<(), anyhow::Error> {
 
                         // wait for a single key press
                         match read()? {
-                            Event::Key(KeyEvent { code, modifiers, .. }) => {
+                            Event::Key(KeyEvent {
+                                code, modifiers, ..
+                            }) => {
                                 match (code, modifiers) {
-                                    (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
+                                    (KeyCode::Char('c'), m)
+                                        if m.contains(KeyModifiers::CONTROL) =>
+                                    {
                                         // Ctrl-C → break out
                                         disable_raw_mode()?;
-                                        break 'results_level
+                                        break 'results_level;
                                     }
-                                    (KeyCode::Char('d'), m) if m.contains(KeyModifiers::CONTROL) => {
+                                    (KeyCode::Char('d'), m)
+                                        if m.contains(KeyModifiers::CONTROL) =>
+                                    {
                                         // Ctrl-C → break out
                                         // todo break outer loop
                                         disable_raw_mode()?;
-                                        break 'toplevel
+                                        break 'toplevel;
                                     }
-                                    _ => {
-                                        continue 'results_level
-                                    }
+                                    _ => continue 'results_level,
                                 }
                             }
                             _ => {}
                         }
                     } else {
                         disable_raw_mode()?;
-                        break 'results_level
+                        break 'results_level;
                     }
                 }
-            },
+            }
             Err(ReadlineError::Interrupted) => {
                 // cancels current line
-                continue 'toplevel
-            },
-            Err(ReadlineError::Eof) => {
-                break 'toplevel
-            },
-            Err(err) => {
-                return Err(err.into())
+                continue 'toplevel;
             }
+            Err(ReadlineError::Eof) => break 'toplevel,
+            Err(err) => return Err(err.into()),
         }
     }
 
-    rl
-    .save_history(&history_path)
-    .context("could not save history")?;
+    rl.save_history(&history_path)
+        .context("could not save history")?;
 
     Ok(())
 }
@@ -318,6 +349,7 @@ fn help(program: &str) -> String {
     result.push_str("-h:            help\n");
     result.push_str("-v:            verbose (debug info)\n");
     result.push_str("-i:            info\n");
+    result.push_str("-d file:       read in declaration config (TOML) from file\n");
     result.push_str("-f file:       read in datalog program from file\n");
     result.push_str("-s '...':      read in datalog program from string\n");
     result.push_str("-c:            analysis only (check), prints out inferred declarations\n");

@@ -1,17 +1,19 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use crate::lang::parse::Term;
+use crate::errors;
+use crate::lang;
+use crate::lang::parse;
 use crate::lang::parse::FunctorTerm;
 use crate::lang::parse::Literal;
-use crate::lang::parse::Statement;
 use crate::lang::parse::Program;
+use crate::lang::parse::Statement;
+use crate::lang::parse::Term;
 use crate::lang::parse::TypedProgram;
 use crate::lang::parse::TypedStatement;
 use crate::lang::unify;
+use crate::lang::{Defs, Strata};
 use crate::storage::format;
-use crate::errors;
-
 /// TODO: make sure all functor names are <= 127 length
 /// see src/storage/sizedbuf.rs:write_atom_offset
 
@@ -25,7 +27,6 @@ fn convert_to_typed_term(term: &Term) -> Term {
         Term::Int(_) => Term::Atom("int".to_string()),
         Term::Str(_) => Term::Atom("string".to_string()),
         Term::Var(s) => Term::Var(s.to_string()),
-        Term::AggVar(_, _) => Term::Atom("int".to_string()),
         Term::Functor(_, _, _) => unreachable!(),
     }
 }
@@ -33,22 +34,25 @@ fn convert_to_typed_term(term: &Term) -> Term {
 fn convert_to_typed_functor(functor: &FunctorTerm) -> FunctorTerm {
     Term::Functor(
         functor.functor_name().to_string(),
-        functor.functor_args().iter().map(convert_to_typed_term).collect(),
+        functor
+            .functor_args()
+            .iter()
+            .map(convert_to_typed_term)
+            .collect(),
         false,
     )
 }
 
 fn convert_typed_to_scm(decl: &FunctorTerm) -> Vec<u8> {
-    decl
-    .functor_args()
-    .iter()
-    .map(|term| match term {
-        Term::Atom(s) if s == "atom" => format::ATOM_TYPE,
-        Term::Atom(s) if s == "string" => format::STRING_TYPE,
-        Term::Atom(s) if s == "int" => format::INT_TYPE,
-        _ => unreachable!(),
-    })
-    .collect()
+    decl.functor_args()
+        .iter()
+        .map(|term| match term {
+            Term::Atom(s) if s == "atom" => format::ATOM_TYPE,
+            Term::Atom(s) if s == "string" => format::STRING_TYPE,
+            Term::Atom(s) if s == "int" => format::INT_TYPE,
+            _ => unreachable!(),
+        })
+        .collect()
 }
 
 pub fn typecheck(program: Program) -> Result<TypedProgram, anyhow::Error> {
@@ -60,38 +64,30 @@ pub fn typecheck(program: Program) -> Result<TypedProgram, anyhow::Error> {
     // Typed form of program only concerns assertions (rules and facts). Not
     // included are statements that are queries and retractions. These are not
     // typechecked.
-    let mut typed_program= vec![];
+    let mut typed_program = vec![];
 
     // preload with user provided declarations
     for user_decl in program.declarations {
         let name = user_decl.functor_name();
         let arity = user_decl.functor_arity();
 
-        let valid_decl=
-            user_decl
-            .functor_args()
-            .into_iter()
-            .all(|term| {
-                match term {
-                    Term::Atom(s)
-                        if s == "atom"
-                        || s == "int"
-                        || s == "string" => true,
-                    _ => false,
-                }
-            });
+        let valid_decl = user_decl.functor_args().into_iter().all(|term| match term {
+            Term::Atom(s) if s == "atom" || s == "int" || s == "string" => true,
+            _ => false,
+        });
         if !valid_decl {
             return Err(errors::RecallError::TypeError(format!(
                 "declaration for predicate {}/{} does not contain valid type \
                 specifiers: atom, int, or string",
                 name, arity,
-            )).into())
+            ))
+            .into());
         }
 
         let key = (name.to_string(), arity);
         computed_decls
-        .entry(key)
-        .or_insert_with(|| user_decl.clone());
+            .entry(key)
+            .or_insert_with(|| user_decl.clone());
 
         // Ensure this user declaration, if restated, is consistent with the
         // prior declaration.
@@ -101,7 +97,8 @@ pub fn typecheck(program: Program) -> Result<TypedProgram, anyhow::Error> {
             return Err(errors::RecallError::TypeError(format!(
                 "inconsistent declarations for {}/{}",
                 name, arity,
-            )).into());
+            ))
+            .into());
         }
     }
 
@@ -110,11 +107,11 @@ pub fn typecheck(program: Program) -> Result<TypedProgram, anyhow::Error> {
         match stmt {
             Statement::Query(functor) => {
                 statements.push(TypedStatement::Query(functor));
-            },
+            }
 
             Statement::Retraction(literal) => {
                 statements.push(TypedStatement::Retraction(literal));
-            },
+            }
 
             Statement::Assertion(literal) => {
                 let name = literal.head.functor_name();
@@ -122,18 +119,13 @@ pub fn typecheck(program: Program) -> Result<TypedProgram, anyhow::Error> {
 
                 let typed_literal = Literal {
                     head: convert_to_typed_functor(&literal.head),
-                    body:
-                        literal
-                        .body
-                        .iter()
-                        .map(convert_to_typed_functor)
-                        .collect()
+                    body: literal.body.iter().map(convert_to_typed_functor).collect(),
                 };
 
                 let key = (name.to_string(), arity);
                 computed_decls
-                .entry(key)
-                .or_insert_with(|| typed_literal.head.clone());
+                    .entry(key)
+                    .or_insert_with(|| typed_literal.head.clone());
 
                 // add typed form of assertion literal
                 typed_program.push(typed_literal);
@@ -142,17 +134,14 @@ pub fn typecheck(program: Program) -> Result<TypedProgram, anyhow::Error> {
                 // one of the statements.
                 let key = (name.to_string(), arity);
                 if literal.is_rule() {
-                    let existing_rules =
-                        defs
-                        .entry(key)
-                        .or_insert(vec![]);
+                    let existing_rules = defs.entry(key).or_insert(vec![]);
 
                     existing_rules.push(literal);
                 } else {
                     facts.insert((name.to_string(), arity));
                     statements.push(TypedStatement::Fact(literal.head));
                 }
-            },
+            }
         }
     }
 
@@ -166,7 +155,8 @@ pub fn typecheck(program: Program) -> Result<TypedProgram, anyhow::Error> {
                 return Err(errors::RecallError::TypeError(format!(
                     "declaration for {}/{} not found",
                     name, arity,
-                )).into());
+                ))
+                .into());
             }
         }
     }
@@ -180,20 +170,16 @@ pub fn typecheck(program: Program) -> Result<TypedProgram, anyhow::Error> {
         // first unifying with the head, then the body.
         let computed_decl = &computed_decls[&(name.clone(), arity)];
         let init = unify::unify(&typed_literal.head, computed_decl);
-        let result =
-            typed_literal
-            .body
-            .iter()
-            .fold(init, |acc, term| {
-                if let Some(bindings) = acc {
-                    let name = term.functor_name().to_string();
-                    let arity = term.functor_arity();
-                    let computed_decl = &computed_decls[&(name, arity)];
-                    unify::unify_with_bindings(term, computed_decl, bindings)
-                } else {
-                    None
-                }
-            });
+        let result = typed_literal.body.iter().fold(init, |acc, term| {
+            if let Some(bindings) = acc {
+                let name = term.functor_name().to_string();
+                let arity = term.functor_arity();
+                let computed_decl = &computed_decls[&(name, arity)];
+                unify::unify_with_bindings(term, computed_decl, bindings)
+            } else {
+                None
+            }
+        });
 
         // If the unification succeeds, then update the computed decl with these
         // updated bindings.
@@ -205,7 +191,8 @@ pub fn typecheck(program: Program) -> Result<TypedProgram, anyhow::Error> {
             return Err(errors::RecallError::TypeError(format!(
                 "could not determine type for {}/{}",
                 name, arity,
-            )).into());
+            ))
+            .into());
         }
     }
 
@@ -213,10 +200,13 @@ pub fn typecheck(program: Program) -> Result<TypedProgram, anyhow::Error> {
     for ((name, arity), typed_functor) in computed_decls.iter() {
         for arg in typed_functor.functor_args() {
             match arg {
-                Term::Var(s) => return Err(errors::RecallError::TypeError(format!(
-                    "could not determine type for variable {} in {}/{}",
-                    s, name, arity,
-                )).into()),
+                Term::Var(s) => {
+                    return Err(errors::RecallError::TypeError(format!(
+                        "could not determine type for variable {} in {}/{}",
+                        s, name, arity,
+                    ))
+                    .into())
+                }
                 _ => continue,
             }
         }
@@ -232,15 +222,12 @@ pub fn typecheck(program: Program) -> Result<TypedProgram, anyhow::Error> {
     }
 
     // collect all the schemas for rules and facts (assertions)
-    let schemas =
-        HashMap::from_iter(
-            computed_decls
-            .into_iter()
-            .map(|((name, arity), computed_decl)| {
-                let scm = convert_typed_to_scm(&computed_decl);
-                ((name, arity), scm)
-            })
-        );
+    let schemas = HashMap::from_iter(computed_decls.into_iter().map(
+        |((name, arity), computed_decl)| {
+            let scm = convert_typed_to_scm(&computed_decl);
+            ((name, arity), scm)
+        },
+    ));
 
     Ok(TypedProgram {
         defs,
@@ -248,73 +235,6 @@ pub fn typecheck(program: Program) -> Result<TypedProgram, anyhow::Error> {
         schemas,
         statements,
     })
-}
-
-////////////////////////////////////////////////////////////////////////////////
-/// Ensure no aggegrate variables are used in the following positions:
-///   - body of rule
-///   - query
-/// Ensure no variable used in aggregated context is used outside in head
-/// of rule
-////////////////////////////////////////////////////////////////////////////////
-
-pub fn check_aggregate_var_usage(program: &Program) -> Result<(), anyhow::Error> {
-    for stmt in program.statements.iter() {
-        if let Statement::Assertion(literal) = stmt {
-            let name = literal.head.functor_name();
-            let arity = literal.head.functor_arity();
-
-            // aggregate var usage is correct in head of rule
-            {
-                let mut regular_vars = vec![];
-                let mut agg_vars = vec![];
-                for arg in literal.head.functor_args() {
-                    match arg {
-                        Term::Var(v) => regular_vars.push(v),
-                        Term::AggVar(_, v) => agg_vars.push(v),
-                        _ => continue,
-                    }
-                }
-                for agg_var in agg_vars {
-                    if regular_vars.contains(&agg_var) {
-                        return Err(errors::RecallError::TypeError(format!(
-                            "aggregate variable '{}' used in non-aggregate context in the head of the rule {}/{}",
-                            agg_var, name, arity,
-                        )).into())
-                    }
-                }
-            }
-
-            // check invalid use in body of rule
-            for functor in literal.body.iter() {
-                for arg in functor.functor_args() {
-                    if let Term::AggVar(_, var) = arg {
-                        return Err(errors::RecallError::TypeError(format!(
-                            "aggregate variable '{}' found in the body of the rule {}/{}",
-                            var, name, arity,
-                        )).into())
-                    }
-                }
-            }
-            continue
-        }
-
-        // check invalid use in query
-        if let Statement::Query(functor) = stmt {
-            let name = functor.functor_name();
-            for arg in functor.functor_args() {
-                if let Term::AggVar(_, var) = arg {
-                    return Err(errors::RecallError::TypeError(format!(
-                        "aggregate variable '{}' found in the query {}",
-                        var, name,
-                    )).into())
-                }
-            }
-            continue
-        }
-    }
-
-    Ok(())
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -332,8 +252,7 @@ pub fn check_range_restriction_property(program: &Program) -> Result<(), anyhow:
             let name = literal.head.functor_name();
             let arity = literal.head.functor_arity();
             let head_vars = collect_variables(&literal.head);
-            let body_vars =
-                literal
+            let body_vars = literal
                 .body
                 .iter()
                 .flat_map(collect_variables)
@@ -343,7 +262,8 @@ pub fn check_range_restriction_property(program: &Program) -> Result<(), anyhow:
                     return Err(errors::RecallError::TypeError(format!(
                         "variable '{}' in head of {}/{} not found in body",
                         head_var, name, arity,
-                    )).into())
+                    ))
+                    .into());
                 }
             }
         }
@@ -382,7 +302,8 @@ pub fn check_negation_safety_condition(program: &Program) -> Result<(), anyhow::
                     return Err(errors::RecallError::TypeError(format!(
                         "variable '{}' in head of {}/{} not found in body in a positive position",
                         neg_var, name, arity,
-                    )).into())
+                    ))
+                    .into());
                 }
             }
         }
@@ -391,73 +312,147 @@ pub fn check_negation_safety_condition(program: &Program) -> Result<(), anyhow::
     Ok(())
 }
 
+// Rename original var names to be `v#` which will never clash since user var
+// names have to start with a uppercase letter or underscore.
+pub fn rename_vars(defs: parse::Defs) -> lang::Defs {
+    let mut result: Defs = HashMap::new();
+
+    let mut k = 0u32;
+
+    for ((name, arity), clauses) in defs {
+        let functor_spec = format!("{}/{}", name, arity);
+
+        let head_suffixes = (0..arity)
+            .map(|_| {
+                k = k.checked_add(1).unwrap();
+                k
+            })
+            .collect::<Vec<_>>();
+
+        let mut heads_: Vec<lang::Atom> = Vec::with_capacity(clauses.len());
+        let mut clauses_: Vec<Vec<lang::Atom>> = Vec::with_capacity(clauses.len());
+
+        for parse::Literal { head, body } in clauses {
+            let mut clause_renames = HashMap::new();
+
+            // work on head atom
+            {
+                let (name, args, negated) = head.functor_parts();
+
+                debug_assert_eq!(args.len(), arity.into());
+
+                let mut args_ = Vec::with_capacity(args.len());
+
+                for (i, atom) in args.into_iter().enumerate() {
+                    args_.push(match atom {
+                        parse::Term::Var(var) => {
+                            let var_ = format!("v{}", head_suffixes[i]);
+                            clause_renames.insert(var, var_.clone());
+                            parse::Term::Var(var_)
+                        }
+                        _ => atom,
+                    });
+                }
+
+                heads_.push(parse::Term::Functor(name, args_, negated));
+            }
+
+            // work on body atoms
+            let mut clause_: Vec<lang::Atom> = vec![];
+            for atom in body {
+                let (name, args, negated) = atom.functor_parts();
+
+                let mut args_ = Vec::with_capacity(args.len());
+
+                for atom in args {
+                    args_.push(match atom {
+                        parse::Term::Var(var) => {
+                            if let Some(var_) = clause_renames.get(&var) {
+                                parse::Term::Var(var_.to_string())
+                            } else {
+                                k = k.checked_add(1).unwrap();
+                                let var_ = format!("v{}", k);
+                                clause_renames.insert(var, var_.clone());
+                                parse::Term::Var(var_)
+                            }
+                        }
+                        _ => atom,
+                    });
+                }
+
+                clause_.push(parse::Term::Functor(name, args_, negated));
+            }
+
+            clauses_.push(clause_);
+        }
+
+        result.insert(
+            functor_spec,
+            lang::Rule {
+                head: heads_.pop().unwrap(),
+                clauses: clauses_,
+            },
+        );
+    }
+
+    result
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 /// Stratify program
 ////////////////////////////////////////////////////////////////////////////////
 
-pub type Strata = Vec<Vec<Literal>>;
-
-pub fn stratify_rules(rules: Vec<Literal>) -> Result<Strata, anyhow::Error> {
+pub fn stratify_rules(defs: Defs) -> Result<Strata, anyhow::Error> {
     use tools::*;
 
-    // Need to group all the rules by functor spec (e.g. pair/2)
-    let grouped_rules =
-        rules
-        .into_iter()
-        .fold(HashMap::<String, Vec<Literal>>::new(), |mut acc, literal| {
-            let rules =
-                acc
-                .entry(literal.head.functor_spec())
-                .or_insert(vec![]);
-            rules.push(literal);
-            acc
-        });
-
-    let rules_list =
-        grouped_rules
-        .keys()
-        .collect::<Vec<_>>();
+    let rules_list = defs.keys().collect::<Vec<_>>();
     let n = rules_list.len();
     let rules_map: HashMap<&String, usize> = HashMap::from_iter(
         rules_list
-        .iter()
-        .enumerate()
-        .map(|(i, functor_spec)| {
-            (*functor_spec, i)
-        })
+            .iter()
+            .enumerate()
+            .map(|(i, &functor_spec)| (functor_spec, i)),
     );
+
+    // println!("rules list: {rules_list:?}");
+    // println!("rules map: {rules_map:?}");
 
     // labelled negated edges
     let mut negated: Graph<bool> = vec![vec![]; n];
 
     // labelled aggregated edges
-    let mut aggregated: Graph<bool> = vec![vec![]; n];
+    // let mut aggregated: Graph<bool> = vec![vec![]; n];
 
     // build precedence graph from rules
     let mut p = Precedence::new(n);
 
-    for (head_functor_spec, rules) in grouped_rules.iter() {
-        for rule in rules.iter() {
-            // construct an edge from each rule in body to it rule head
-            for body_functor in rule.body.iter() {
-                let body_functor_spec = body_functor.functor_spec();
+    for (head_spec, rule) in defs.iter() {
+        for clause in rule.clauses.iter() {
+            // construct an edge from each rule in body to its rule head
+            for atom in clause.iter() {
+                let body_spec = atom.functor_spec();
 
                 // exclude facts in body as they do not contribute to edges in the graph
-                if let Some(u) = rules_map.get(&body_functor_spec) {
-                    let v = rules_map[head_functor_spec];
+                if let Some(&u) = rules_map.get(&body_spec) {
+                    // println!("add edge for {body_spec} -> {head_spec}");
+                    let v = rules_map[head_spec];
 
-                    p.add(*u, v);
+                    if p.add(u, v) {
+                        // label negated edges
+                        negated[u].push(atom.functor_negated());
 
-                    // label negated edges
-                    negated[*u].push(body_functor.functor_negated());
-
-                    // label aggregated edges
-                    aggregated[*u].push(rule.head.functor_aggregated());
+                        // // label aggregated edges
+                        // aggregated[u].push(rule.head.functor_aggregated());
+                    } else {
+                        let v_index = p.graph[u].iter().position(|t| *t == v).unwrap();
+                        negated[u][v_index] = negated[u][v_index] || atom.functor_negated();
+                    }
                 }
             }
         }
     }
+
+    // println!("graph: {:?}", p.graph);
 
     let cycles = collect_graph_cycles(&p.graph);
 
@@ -470,12 +465,7 @@ pub fn stratify_rules(rules: Vec<Literal>) -> Result<Strata, anyhow::Error> {
         while j < cycle.len() {
             let u = cycle[i];
             let v = cycle[j];
-            let v_index =
-                p
-                .graph[u]
-                .iter()
-                .position(|t| *t == v)
-                .unwrap();
+            let v_index = p.graph[u].iter().position(|t| *t == v).unwrap();
 
             if negated[u][v_index] == true {
                 return Err(errors::RecallError::RuntimeError(format!(
@@ -485,19 +475,19 @@ pub fn stratify_rules(rules: Vec<Literal>) -> Result<Strata, anyhow::Error> {
                     .map(|u| rules_list[*u].to_string())
                     .collect::<Vec<_>>()
                     .join(" -> "),
-                )).into())
+                )).into());
             }
 
-            if aggregated[u][v_index] == true {
-                return Err(errors::RecallError::RuntimeError(format!(
-                    "The rules {} form a cycle that contains a aggregated link. This is not allowed because the program cannot be stratified.",
-                    cycle
-                    .iter()
-                    .map(|u| rules_list[*u].to_string())
-                    .collect::<Vec<_>>()
-                    .join(" -> "),
-                )).into())
-            }
+            // if aggregated[u][v_index] == true {
+            //     return Err(errors::RecallError::RuntimeError(format!(
+            //         "The rules {} form a cycle that contains a aggregated link. This is not allowed because the program cannot be stratified.",
+            //         cycle
+            //         .iter()
+            //         .map(|u| rules_list[*u].to_string())
+            //         .collect::<Vec<_>>()
+            //         .join(" -> "),
+            //     )).into());
+            // }
 
             i += 1;
             j += 1;
@@ -510,42 +500,34 @@ pub fn stratify_rules(rules: Vec<Literal>) -> Result<Strata, anyhow::Error> {
     visit_graph(&p.graph, &mut priority);
     assign_graph(&p.transposed, priority, &mut components);
 
-    Ok(
-        components
+    // println!("components {components:?}");
+    Ok(components
         .into_iter()
         .map(|component| {
             component
-            .into_iter()
-            .flat_map(|i| {
-                let functor_spec = rules_list[i];
-                let rules_for_spec = grouped_rules[functor_spec].clone();
-                rules_for_spec
-            })
-            .collect::<Vec<_>>()
+                .into_iter()
+                .map(|i| {
+                    let functor_spec = rules_list[i];
+                    let key = functor_spec.to_string();
+                    let value = defs[functor_spec].clone();
+                    (key, value)
+                })
+                .collect()
         })
-        .collect::<Vec<_>>()
-    )
+        .collect::<Vec<_>>())
 }
-
 
 /// helpers
 
 fn collect_variables(term: &Term) -> Vec<&String> {
     match term {
         Term::Var(s) => vec![s],
-        Term::AggVar(_, s) => vec![s],
-        Term::Functor(_, terms, _) =>
-            terms
-            .iter()
-            .flat_map(collect_variables)
-            .collect(),
+        Term::Functor(_, terms, _) => terms.iter().flat_map(collect_variables).collect(),
         _ => vec![],
     }
 }
 
-fn collect_graph_cycles(
-    g: &tools::Graph<usize>,
-) -> Vec<Vec<usize>> {
+fn collect_graph_cycles(g: &tools::Graph<usize>) -> Vec<Vec<usize>> {
     fn visit_vertex(
         g: &tools::Graph<usize>,
         u: usize,
@@ -560,7 +542,7 @@ fn collect_graph_cycles(
                 // Collect self-cycles too
                 if u == *v {
                     cycles.push(vec![u, u]);
-                    continue
+                    continue;
                 }
 
                 if visited[*v] {
@@ -570,7 +552,7 @@ fn collect_graph_cycles(
                     while p >= 0 {
                         cycle.push(p as usize);
                         if p as usize == *v {
-                            break
+                            break;
                         }
                         p = parent[p as usize];
                     }
@@ -618,15 +600,17 @@ mod tools {
             }
         }
 
-        pub fn add(&mut self, u: usize, v: usize) {
+        pub fn add(&mut self, u: usize, v: usize) -> bool {
             assert!(u < self.graph.len());
             assert!(v < self.graph.len());
-            if self.edges.contains(&(u, v)) {
-                return
+            if self.edges.insert((u, v)) {
+                self.edges.insert((u, v));
+                self.graph[u].push(v);
+                self.transposed[v].push(u);
+                true
+            } else {
+                false
             }
-            self.edges.insert((u, v));
-            self.graph[u].push(v);
-            self.transposed[v].push(u);
         }
     }
 
@@ -660,11 +644,7 @@ mod tools {
         }
     }
 
-    pub fn assign_graph(
-        tg: &Graph<usize>,
-        priority: Vec<usize>,
-        components: &mut Vec<Vec<usize>>,
-    ) {
+    pub fn assign_graph(tg: &Graph<usize>, priority: Vec<usize>, components: &mut Vec<Vec<usize>>) {
         assert!(tg.len() == priority.len());
         let n = tg.len();
         let mut visited = vec![false; n];
@@ -696,27 +676,25 @@ mod tools {
 
     #[cfg(test)]
     mod tests {
-        use std::collections::HashMap;
         use super::*;
+        use std::collections::HashMap;
 
         #[test]
         fn it_can_get_prioties_from_visit_vertex() {
             let vertices = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
-            let map: HashMap<char, usize> = HashMap::from_iter(
-                vertices
-                .iter()
-                .enumerate()
-                .map(|(i, ch)| {
-                    (*ch, i)
-                })
-            );
+            let map: HashMap<char, usize> =
+                HashMap::from_iter(vertices.iter().enumerate().map(|(i, ch)| (*ch, i)));
             let n = map.len();
             let mut p = Precedence::new(n);
             for (u, v) in vec![
-                ('a', 'b'), ('a', 'b'),
-                ('b', 'c'), ('b', 'd'), ('b', 'e'),
+                ('a', 'b'),
+                ('a', 'b'),
+                ('b', 'c'),
+                ('b', 'd'),
+                ('b', 'e'),
                 ('c', 'a'),
-                ('e', 'f'), ('e', 'g'),
+                ('e', 'f'),
+                ('e', 'g'),
                 ('g', 'f'),
                 ('f', 'h'),
                 ('h', 'g'),
@@ -727,14 +705,13 @@ mod tools {
             let mut components = vec![];
             visit_graph(&p.graph, &mut priority);
             assign_graph(&p.transposed, priority, &mut components);
-            let result =
-                components
+            let result = components
                 .into_iter()
                 .map(|component| {
                     component
-                    .into_iter()
-                    .map(|i| vertices[i])
-                    .collect::<HashSet<_>>()
+                        .into_iter()
+                        .map(|i| vertices[i])
+                        .collect::<HashSet<_>>()
                 })
                 .collect::<Vec<_>>();
             assert_eq!(result.len(), 4);
@@ -749,72 +726,23 @@ mod tools {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lang::scan::Scanner;
-    use crate::lang::parse::Parser;
-    use crate::lang::parse::Statement;
     use crate::lang::parse::parse_program;
+    use crate::lang::parse::Parser;
+    use crate::lang::scan::Scanner;
 
-    #[test]
-    fn it_checks_aggregate_var_usage() -> Result<(), anyhow::Error> {
-        { // valid
-            let program = "
-                foo(X, Y, Z) :- bar(X), baz(Z, X), quux(Y).
-            ";
-            let scanner = Scanner::new(program);
-            let mut parser = Parser::new(scanner);
-            let program = parse_program(&mut parser)?;
-            check_aggregate_var_usage(&program)?;
-        }
-
-        { // valid
-            let program = "
-                foo(X, Y, count<Z>) :- bar(X), baz(Z, X), quux(Y).
-            ";
-            let scanner = Scanner::new(program);
-            let mut parser = Parser::new(scanner);
-            let program = parse_program(&mut parser)?;
-            check_aggregate_var_usage(&program)?;
-        }
-
-        { // invalid, body of rule
-            let program = "
-                foo(X, Y, Z) :- bar(X), baz(Z, X), quux(count<Z>).
-            ";
-            let scanner = Scanner::new(program);
-            let mut parser = Parser::new(scanner);
-            let program = parse_program(&mut parser)?;
-            let err = check_aggregate_var_usage(&program).unwrap_err();
-            assert!(err.to_string().contains("aggregate variable 'Z' found in the body of the rule foo/3"));
-        }
-
-        { // invalid, query
-            let program = "
-                foo(X, count<Y>)?
-            ";
-            let scanner = Scanner::new(program);
-            let mut parser = Parser::new(scanner);
-            let program = parse_program(&mut parser)?;
-            let err = check_aggregate_var_usage(&program).unwrap_err();
-            assert!(err.to_string().contains("aggregate variable 'Y' found in the query foo"));
-        }
-
-        { // invalid, usage of agg var
-            let program = "
-                foo(X, Y, count<X>) :- bar(X), baz(Y).
-            ";
-            let scanner = Scanner::new(program);
-            let mut parser = Parser::new(scanner);
-            let program = parse_program(&mut parser)?;
-            let err = check_aggregate_var_usage(&program).unwrap_err();
-            assert!(err.to_string().contains("aggregate variable 'X' used in non-aggregate context in the head of the rule foo/3"));
-        }
-
-        Ok(())
+    fn get_rules(program: &str) -> Result<Defs, anyhow::Error> {
+        let scanner = Scanner::new(program);
+        let mut parser = Parser::new(scanner);
+        let program = parse_program(&mut parser)?;
+        let typed_program = typecheck(program)?;
+        let rules = rename_vars(typed_program.defs);
+        Ok(rules)
     }
 
     #[test]
     fn it_checks_range_restriction_property() -> Result<(), anyhow::Error> {
-        { // valid
+        {
+            // valid
             let program = "
                 foo.
             ";
@@ -824,7 +752,8 @@ mod tests {
             check_range_restriction_property(&program)?;
         }
 
-        { // valid
+        {
+            // valid
             let program = "
                 foo(X, Y, Z) :- bar(X), baz(Z, X), quux(Y).
             ";
@@ -834,7 +763,8 @@ mod tests {
             check_range_restriction_property(&program)?;
         }
 
-        { // invalid
+        {
+            // invalid
             let program = "
                 foo(X, Y, Z) :- bar(X), baz(Z, X), quux(Z).
             ";
@@ -842,7 +772,9 @@ mod tests {
             let mut parser = Parser::new(scanner);
             let program = parse_program(&mut parser)?;
             let err = check_range_restriction_property(&program).unwrap_err();
-            assert!(err.to_string().contains("variable 'Y' in head of foo/3 not found in body"));
+            assert!(err
+                .to_string()
+                .contains("variable 'Y' in head of foo/3 not found in body"));
         }
 
         Ok(())
@@ -850,7 +782,8 @@ mod tests {
 
     #[test]
     fn it_checks_negation_safety_condition() -> Result<(), anyhow::Error> {
-        { // valid
+        {
+            // valid
             let program = "
                 foo.
             ";
@@ -860,7 +793,8 @@ mod tests {
             check_negation_safety_condition(&program)?;
         }
 
-        { // valid
+        {
+            // valid
             let program = "
                 foo(X, Y, Z) :- bar(X), baz(Y), bax(Z), not quuz(Z).
             ";
@@ -870,7 +804,8 @@ mod tests {
             check_negation_safety_condition(&program)?;
         }
 
-        { // invalid
+        {
+            // invalid
             let program = "
                 foo(X, Y, Z) :- bar(X), baz(Y), not quuz(Z).
             ";
@@ -878,7 +813,9 @@ mod tests {
             let mut parser = Parser::new(scanner);
             let program = parse_program(&mut parser)?;
             let err = check_negation_safety_condition(&program).unwrap_err();
-            assert!(err.to_string().contains("variable 'Z' in head of foo/3 not found in body in a positive position"));
+            assert!(err.to_string().contains(
+                "variable 'Z' in head of foo/3 not found in body in a positive position"
+            ));
         }
 
         Ok(())
@@ -886,23 +823,8 @@ mod tests {
 
     #[test]
     fn it_stratifies_programs() -> Result<(), anyhow::Error> {
-        fn get_rules(program: &str) -> Result<Vec<Literal>, anyhow::Error> {
-            let scanner = Scanner::new(program);
-            let mut parser = Parser::new(scanner);
-            let program = parse_program(&mut parser)?;
-            Ok(
-                program
-                .statements
-                .into_iter()
-                .map(|stmt| match stmt {
-                    Statement::Assertion(stmt) => stmt,
-                    _ => unreachable!(),
-                })
-                .collect::<Vec<_>>()
-            )
-        }
-
-        { // p-p cycle
+        {
+            // p-p cycle
             let program = "
                 p :- p.
             ";
@@ -911,7 +833,8 @@ mod tests {
             assert_eq!(strata.len(), 1);
         }
 
-        { // p-q cycle
+        {
+            // p-q cycle
             let program = "
                 p :- q.
                 q :- p.
@@ -921,7 +844,8 @@ mod tests {
             assert_eq!(strata.len(), 1);
         }
 
-        { // a_b_c_cycle
+        {
+            // a_b_c_cycle
             let program = "
                 # stratum 0
                 b :- a.
@@ -942,7 +866,8 @@ mod tests {
             assert_eq!(strata.len(), 5);
         }
 
-        { // no_cycle
+        {
+            // no_cycle
             let program = "
                 d. # dummy rule
                 e :- d.
@@ -955,7 +880,8 @@ mod tests {
             assert_eq!(strata.len(), 4);
         }
 
-        { // valid usage of "not"
+        {
+            // valid usage of "not"
             let program = "
                 a. # dummy rule
                 b :- a.
@@ -966,7 +892,8 @@ mod tests {
             assert_eq!(strata.len(), 3);
         }
 
-        { // p-q cycle with "not"
+        {
+            // p-q cycle with "not"
             let program = "
                 p :- not q.
                 q :- not p.
@@ -976,37 +903,17 @@ mod tests {
             assert!(err.to_string().contains("cycle that contains a negative"));
         }
 
-        { // valid usage of aggregation
+        {
+            // handles double negative bug
             let program = "
-                c(X) :- foo(X).
-                a(X) :- b(X).
-                b(count<X>) :- c(X).
+                a :- c.
+                b :- not a.
+                b :- not a.
+                c :- a.
             ";
             let rules = get_rules(program)?;
             let strata = stratify_rules(rules.clone())?;
-            assert_eq!(strata.len(), 3);
-        }
-
-        { // cycle with aggregation
-            let program = "
-                c(X) :- a(X).
-                a(X) :- b(X).
-                b(count<X>) :- c(X).
-            ";
-            let rules = get_rules(program)?;
-            let err = stratify_rules(rules.clone()).unwrap_err();
-            assert!(err.to_string().contains("cycle that contains a aggregated"));
-        }
-
-        { // another cycle with aggregation
-            let program = "
-                q(X) :- foo(X).
-                p(X) :- q(X).
-                p(sum<X>) :- p(X).
-            ";
-            let rules = get_rules(program)?;
-            let err = stratify_rules(rules.clone()).unwrap_err();
-            assert!(err.to_string().contains("cycle that contains a aggregated"));
+            assert_eq!(strata.len(), 2);
         }
 
         Ok(())

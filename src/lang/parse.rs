@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
+use crate::errors::RecallError;
 use crate::lang::scan::Scanner;
 use crate::lang::scan::Token;
-use crate::errors::RecallError;
 
 pub type FunctorTerm = Term;
 pub type Defs = HashMap<(String, u8), Vec<Literal>>;
@@ -49,13 +49,11 @@ impl Literal {
     }
 
     pub fn is_rule(&self) -> bool {
-           self.body.len() > 0
-        || self.head.functor_arity() == 0
+        self.body.len() > 0 || self.head.functor_arity() == 0
     }
 
     pub fn is_factlike_rule(&self) -> bool {
-           self.head.functor_arity() == 0
-        && self.body.len() == 0
+        self.head.functor_arity() == 0 && self.body.len() == 0
     }
 }
 
@@ -64,7 +62,6 @@ pub enum Term {
     Atom(String),
     Str(String),
     Var(String),
-    AggVar(String, String),
     Int(i32),
     /// Grammar does not allow functor terms (at the moment). But this
     /// is still useful for packaging functor terms into literals since
@@ -73,6 +70,14 @@ pub enum Term {
 }
 
 impl Term {
+    pub fn functor_parts(self) -> (String, Vec<Term>, bool) {
+        if let Term::Functor(name, args, negated) = self {
+            (name, args, negated)
+        } else {
+            unreachable!()
+        }
+    }
+
     pub fn functor_spec(&self) -> String {
         if let Term::Functor(name, args, _) = self {
             format!("{}/{}", name, args.len())
@@ -112,44 +117,6 @@ impl Term {
             unreachable!()
         }
     }
-
-    pub fn functor_aggregated(&self) -> bool {
-        self
-        .functor_args()
-        .iter()
-        .any(|arg| match arg {
-            Term::AggVar(_, _) => true,
-            _ => false,
-        })
-    }
-
-    pub fn functor_agg_vars(&self) -> Vec<(&str, &str)> {
-        let mut result = vec![];
-        for arg in self.functor_args().iter() {
-            match arg {
-                Term::AggVar(fun, s) => result.push((fun.as_str(), s.as_str())),
-                _ => continue,
-            }
-        }
-        result
-    }
-
-    pub fn functor_partition_head_vars(&self) -> (Vec<&str>, Vec<&str>) {
-        let mut pivots = vec![];
-        let mut grouped = vec![];
-        for arg in self.functor_args().iter() {
-            match arg {
-                Term::Var(s) => pivots.push(s.as_str()),
-                Term::AggVar(_, s) => {
-                    if !grouped.contains(&s.as_str()) {
-                        grouped.push(s.as_str());
-                    }
-                },
-                _ => continue
-            }
-        }
-        (pivots, grouped)
-    }
 }
 
 pub struct Parser<'a> {
@@ -184,16 +151,21 @@ pub fn parse_program<'a>(parser: &'a mut Parser) -> Result<Program, anyhow::Erro
     let mut statements = vec![];
     Ok(loop {
         match parser.scanner.peek_token()? {
-            Token::End => break Program { declarations, statements },
+            Token::End => {
+                break Program {
+                    declarations,
+                    statements,
+                }
+            }
             Token::Decl => {
                 expect_token(parser, Token::Decl)?;
                 declarations.push(parse_literal(parser, false)?);
                 expect_token(parser, Token::Assertion)?;
-                continue
-            },
+                continue;
+            }
             _ => {
                 statements.push(parse_statement(parser)?);
-                continue
+                continue;
             }
         }
     })
@@ -213,19 +185,23 @@ fn parse_statement<'a>(parser: &'a mut Parser) -> Result<Statement, anyhow::Erro
                 Token::Assertion => {
                     expect_token(parser, Token::Assertion)?;
                     Ok(Statement::Assertion(Literal { head, body }))
-                },
+                }
                 Token::Retraction => {
                     expect_token(parser, Token::Retraction)?;
                     Ok(Statement::Retraction(Literal { head, body }))
-                },
+                }
                 token => Err(RecallError::ParseError(format!(
-                    "unexpected token '{}' when parsing statement", token,
-                )).into()),
+                    "unexpected token '{}' when parsing statement",
+                    token,
+                ))
+                .into()),
             }
-        },
+        }
         token => Err(RecallError::ParseError(format!(
-            "unexpected token '{}' when parsing statement", token,
-        )).into()),
+            "unexpected token '{}' when parsing statement",
+            token,
+        ))
+        .into()),
     }
 }
 
@@ -249,7 +225,6 @@ fn parse_body<'a>(parser: &'a mut Parser) -> Result<Vec<FunctorTerm>, anyhow::Er
             parser.scanner.next_token()?;
         }
 
-
         result.push(parse_literal(parser, negated)?);
     }
 
@@ -259,25 +234,28 @@ fn parse_body<'a>(parser: &'a mut Parser) -> Result<Vec<FunctorTerm>, anyhow::Er
 fn parse_literal<'a>(parser: &'a mut Parser, negated: bool) -> Result<FunctorTerm, anyhow::Error> {
     let name = match parse_term(parser)? {
         Term::Atom(s) | Term::Str(s) => s,
-        term => return Err(RecallError::ParseError(format!(
-            "head position of literal needs to be an atom or str term, got {}", term,
-        )).into()),
+        term => {
+            return Err(RecallError::ParseError(format!(
+                "head position of literal needs to be an atom or str term, got {}",
+                term,
+            ))
+            .into())
+        }
     };
-    let args =
-        if let Token::LP = parser.scanner.peek_token()? {
-            expect_token(parser, Token::LP)?;
+    let args = if let Token::LP = parser.scanner.peek_token()? {
+        expect_token(parser, Token::LP)?;
 
-            if let Token::RP = parser.scanner.peek_token()? {
-                expect_token(parser, Token::RP)?;
-                vec![]
-            } else {
-                let terms = parse_terms(parser)?;
-                expect_token(parser, Token::RP)?;
-                terms
-            }
-        } else {
+        if let Token::RP = parser.scanner.peek_token()? {
+            expect_token(parser, Token::RP)?;
             vec![]
-        };
+        } else {
+            let terms = parse_terms(parser)?;
+            expect_token(parser, Token::RP)?;
+            terms
+        }
+    } else {
+        vec![]
+    };
 
     Ok(Term::Functor(name, args, negated))
 }
@@ -301,18 +279,20 @@ fn parse_term<'a>(parser: &'a mut Parser) -> Result<Term, anyhow::Error> {
 
                 let token = parser.scanner.next_token()?;
 
-                if let Token::Var(s2) = token {
+                if let Token::Var(_) = token {
                     expect_token(parser, Token::GT)?;
-                    Ok(Term::AggVar(s, s2))
+                    unimplemented!("Aggregated vars are not implemented")
                 } else {
                     Err(RecallError::ParseError(format!(
-                        "expected variable term but got '{}'", token,
-                    )).into())
+                        "expected variable term but got '{}'",
+                        token,
+                    ))
+                    .into())
                 }
             } else {
                 Ok(Term::Atom(s))
             }
-        },
+        }
         Token::Str(s) => Ok(Term::Str(s)),
         Token::Var(s) => Ok(Term::Var(s)),
         Token::Integer(n) => Ok(Term::Int(n)),
@@ -322,25 +302,25 @@ fn parse_term<'a>(parser: &'a mut Parser) -> Result<Term, anyhow::Error> {
             if let Token::Integer(n) = token {
                 Ok(Term::Int(n))
             } else {
-                Err(RecallError::ParseError(format!(
-                    "expected integer term but got '{}'", token,
-                )).into())
+                Err(
+                    RecallError::ParseError(format!("expected integer term but got '{}'", token,))
+                        .into(),
+                )
             }
-        },
+        }
         Token::Minus => {
             let token = parser.scanner.next_token()?;
 
             if let Token::Integer(n) = token {
                 Ok(Term::Int(-n))
             } else {
-                Err(RecallError::ParseError(format!(
-                    "expected integer term but got '{}'", token,
-                )).into())
+                Err(
+                    RecallError::ParseError(format!("expected integer term but got '{}'", token,))
+                        .into(),
+                )
             }
-        },
-        token => Err(RecallError::ParseError(format!(
-            "expected term but got '{}'", token,
-        )).into()),
+        }
+        token => Err(RecallError::ParseError(format!("expected term but got '{}'", token,)).into()),
     }
 }
 
@@ -349,10 +329,10 @@ fn expect_token<'a>(parser: &'a mut Parser, expected: Token) -> Result<(), anyho
     if actual == expected {
         Ok(())
     } else {
-        Err(RecallError::ParseError(format!(
-            "expected '{}' but got '{}'",
-            expected, actual,
-        )).into())
+        Err(
+            RecallError::ParseError(format!("expected '{}' but got '{}'", expected, actual,))
+                .into(),
+        )
     }
 }
 
@@ -377,7 +357,6 @@ mod tests {
             same(X)?
             person(alice).
             person(bob).
-            num_people(count<X>) :- person(X).
         ";
         let scanner = Scanner::new(program);
         let mut parser = Parser::new(scanner);
