@@ -15,14 +15,15 @@ use recall::eval;
 use recall::lang::analysis;
 use recall::lang::parse::parse_program;
 use recall::lang::parse::Parser;
-use recall::lang::parse::TypedProgram;
+use recall::lang::parse::Program;
 use recall::lang::scan::Scanner;
 use recall::storage::db::DB;
 use recall::Config;
-use recall::DeclRoot;
 
 fn main() {
-    let result = parse_config(std::env::args().peekable()).and_then(run);
+    let result =
+        parse_config(std::env::args().peekable())
+        .and_then(run);
 
     if let Err(err) = result {
         eprintln!("{:#}", err);
@@ -39,7 +40,6 @@ fn parse_config(mut iter: impl Iterator<Item = String>) -> Result<Config, anyhow
         c: false,
         v: false,
         i: false,
-        declaration: None,
         program: String::new(),
         db: None,
     };
@@ -57,18 +57,6 @@ fn parse_config(mut iter: impl Iterator<Item = String>) -> Result<Config, anyhow
             }
             "-i" => {
                 result.i = true;
-            }
-            "-d" => {
-                if let Some(path) = iter.next() {
-                    let s = fs::read_to_string(&path)
-                        .with_context(|| format!("failed to read {}", path))?;
-                    let r: DeclRoot = toml::from_str(&s)
-                        .with_context(|| format!("failed to parse TOML file {}", path))?;
-
-                    result.declaration = Some(r);
-                } else {
-                    bail!("expected declaration config (TOML) file after '-d'");
-                }
             }
             "-f" => {
                 if let Some(path) = iter.next() {
@@ -132,21 +120,6 @@ fn run(cfg: Config) -> Result<(), anyhow::Error> {
         DB::new_temp()?
     };
 
-    if let Some(root) = cfg.declaration {
-        let txn = db.begin_transaction();
-        match eval::eval_declarations(&txn, root) {
-            Ok(_) => txn.commit()?,
-            Err(e) => {
-                if let Err(e0) = txn.rollback() {
-                    eprintln!("NOTE: could not rollback transaction: {}", e0);
-                } else {
-                    eprintln!("NOTE: transaction rolled back for below error");
-                }
-                return Err(e.into());
-            }
-        }
-    }
-
     if cfg.i {
         let txn = db.begin_transaction();
         match txn.info() {
@@ -167,20 +140,22 @@ fn run(cfg: Config) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-fn get_good_program(program: &String) -> Result<TypedProgram, anyhow::Error> {
+fn get_good_program(program: &String) -> Result<Program, anyhow::Error> {
     let scanner = Scanner::new(program);
     let mut parser = Parser::new(scanner);
     let program = parse_program(&mut parser)?;
     analysis::check_range_restriction_property(&program)?;
     analysis::check_negation_safety_condition(&program)?;
-    let typed_program = analysis::typecheck(program)?;
-    Ok(typed_program)
+    Ok(program)
 }
 
 fn run_batch(program_text: &String, db: DB) -> Result<(), anyhow::Error> {
     let txn = db.begin_transaction();
     let answers = match {
-        get_good_program(program_text).and_then(|program| eval::batch_eval(program, &txn))
+        get_good_program(program_text)
+        .and_then(|program| {
+            eval::batch_eval(&txn, program)
+        })
     } {
         Ok(answers) => {
             txn.commit()?;
@@ -254,7 +229,7 @@ fn run_repl(db: DB) -> Result<(), anyhow::Error> {
                     }
                 };
                 let txn = db.begin_transaction();
-                let answers = match eval::batch_eval(program, &txn) {
+                let answers = match eval::batch_eval(&txn, program) {
                     Ok(results) => {
                         txn.commit()?;
                         results

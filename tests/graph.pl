@@ -4,7 +4,7 @@ link(x,y).
 link(y,z).
 
 node(X) :- link(X, Y).
-node(Y) :- link(X, Y).
+node(X) :- link(Y, X).
 reachable(X, Y) :- link(X, Y).
 reachable(X, Y) :- link(X, Z), reachable(Z, Y).
 indirect(X, Y) :- reachable(X, Y), not link(X, Y).

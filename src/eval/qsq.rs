@@ -5,12 +5,11 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use crate::lang::analysis;
-use crate::lang::parse;
 use crate::lang::unify;
 use crate::lang::unify::Bindings;
 use crate::lang::DBAux;
 use crate::lang::QueryAnswer;
-use crate::lang::{Atom, Defs, Rule, Strata};
+use crate::lang::{Term, Atom, Defs, Rule, Strata};
 
 #[derive(Debug, PartialEq, Eq)]
 struct QueryProgram {
@@ -26,25 +25,28 @@ struct QueryResult {
     answers_changed: bool,
 }
 
-fn collect_rules<DB: DBAux>(query: &Atom, db_helper: &DB) -> parse::Defs {
+fn collect_rules<DB: DBAux>(
+    query: &Atom,
+    db_helper: &DB,
+) -> HashMap<(String, u8), Rule> {
     let mut result = HashMap::new();
 
-    let name = query.functor_name();
-    let arity = query.functor_arity();
+    let name = query.atom_name();
+    let arity = query.atom_arity();
     let mut rule_added = false;
 
     if let Some(rule) = db_helper.get_rule(name, arity) {
-        rule_added = result.insert((name.to_string(), arity), rule).is_none();
+        rule_added = result.insert((name.into(), arity), rule).is_none();
     }
 
     while rule_added {
         let mut candidates = vec![];
 
         for (_, rule) in result.iter() {
-            for clause in rule.iter() {
-                for atom in clause.body.iter() {
-                    let name = atom.functor_name();
-                    let arity = atom.functor_arity();
+            for clause in rule.clauses.iter() {
+                for atom in clause.iter() {
+                    let name = atom.atom_name();
+                    let arity = atom.atom_arity();
 
                     if let Some(rule) = db_helper.get_rule(name, arity) {
                         candidates.push(rule);
@@ -55,8 +57,8 @@ fn collect_rules<DB: DBAux>(query: &Atom, db_helper: &DB) -> parse::Defs {
 
         if {
             candidates.into_iter().any(|candidate| {
-                let name = candidate[0].head.functor_name().to_string();
-                let arity = candidate[0].head.functor_arity();
+                let name = candidate.head.atom_name().into();
+                let arity = candidate.head.atom_arity();
 
                 result.insert((name, arity), candidate).is_none()
             })
@@ -77,11 +79,11 @@ fn rewrite_query_atom(atom: &Atom, bound_flags: &Vec<bool>) -> Atom {
         .collect::<Vec<_>>()
         .join("");
 
-    let name = format!("{}_{}", atom.functor_name(), suffix);
-    let args = atom.functor_args().iter().cloned().collect::<Vec<_>>();
-    let negated = atom.functor_negated();
+    let name = format!("{}_{}", atom.atom_name(), suffix);
+    let args = atom.atom_args().iter().cloned().collect::<Vec<_>>();
+    let negated = atom.atom_negated();
 
-    parse::Term::Functor(name, args, negated)
+    Term::Atom(name, args, negated)
 }
 
 fn rewrite_rule_atom(
@@ -101,19 +103,19 @@ fn rewrite_rule_atom(
         .collect::<Vec<_>>()
         .join("");
 
-    let name = format!("{}_{}", atom.functor_name(), name_suffix);
+    let name = format!("{}_{}", atom.atom_name(), name_suffix);
     let args = atom
-        .functor_args()
+        .atom_args()
         .iter()
         .cloned()
         .map(|atom| match atom {
-            parse::Term::Var(var) => parse::Term::Var(format!("{}_{}", var, var_suffix)),
+            Term::Var(var) => Term::Var(format!("{}_{}", var, var_suffix)),
             other => other,
         })
         .collect::<Vec<_>>();
-    let negated = atom.functor_negated();
+    let negated = atom.atom_negated();
 
-    parse::Term::Functor(name, args, negated)
+    Term::Atom(name, args, negated)
 }
 
 fn rewrite_fact_atom(atom: &Atom, head_bound_flags: &Vec<bool>) -> Atom {
@@ -123,19 +125,19 @@ fn rewrite_fact_atom(atom: &Atom, head_bound_flags: &Vec<bool>) -> Atom {
         .collect::<Vec<_>>()
         .join("");
 
-    let name = format!("{}", atom.functor_name());
+    let name = format!("{}", atom.atom_name());
     let args = atom
-        .functor_args()
+        .atom_args()
         .iter()
         .cloned()
         .map(|atom| match atom {
-            parse::Term::Var(var) => parse::Term::Var(format!("{}_{}", var, var_suffix)),
+            Term::Var(var) => Term::Var(format!("{}_{}", var, var_suffix)),
             other => other,
         })
         .collect::<Vec<_>>();
-    let negated = atom.functor_negated();
+    let negated = atom.atom_negated();
 
-    parse::Term::Functor(name, args, negated)
+    Term::Atom(name, args, negated)
 }
 
 fn adorn_program(query: &Atom, defs: Defs) -> (Atom, Defs) {
@@ -145,14 +147,14 @@ fn adorn_program(query: &Atom, defs: Defs) -> (Atom, Defs) {
     // only rule atoms in `adorn_atoms` should be rules in defs
     let mut adorn_atoms = vec![];
 
-    let query_name = query.functor_name().to_string();
-    let query_arity = query.functor_arity();
+    let query_name = query.atom_name().to_string();
+    let query_arity = query.atom_arity();
 
     let query_bound_flags = query
-        .functor_args()
+        .atom_args()
         .iter()
         .map(|arg| {
-            if let parse::Term::Var(_) = arg {
+            if let Term::Var(_) = arg {
                 false
             } else {
                 true
@@ -166,13 +168,13 @@ fn adorn_program(query: &Atom, defs: Defs) -> (Atom, Defs) {
     let adorned_query = rewrite_query_atom(&query, &query_bound_flags);
 
     while let Some((name, bound_flags)) = adorn_atoms.pop() {
-        let functor_spec = format!("{}/{}", name, bound_flags.len());
-        let rule = defs.get(&functor_spec).unwrap();
+        let atom_spec = format!("{}/{}", name, bound_flags.len());
+        let rule = defs.get(&atom_spec).unwrap();
 
         let mut head_bounded_vars = vec![];
         for i in 0..bound_flags.len() {
             if bound_flags[i] {
-                if let parse::Term::Var(var) = &rule.head.functor_args()[i] {
+                if let Term::Var(var) = &rule.head.atom_args()[i] {
                     head_bounded_vars.push(var.to_string());
                 }
             }
@@ -188,16 +190,16 @@ fn adorn_program(query: &Atom, defs: Defs) -> (Atom, Defs) {
             let mut clause_bounded_vars = head_bounded_vars.clone();
 
             for atom in clause.iter() {
-                let name = atom.functor_name();
-                let arity = atom.functor_arity();
-                let functor_spec = format!("{}/{}", name, arity);
+                let name = atom.atom_name();
+                let arity = atom.atom_arity();
+                let atom_spec = format!("{}/{}", name, arity);
 
-                if defs.contains_key(&functor_spec) {
+                if defs.contains_key(&atom_spec) {
                     /* atom is a rule */
                     let mut atom_bound_flags = Vec::with_capacity(arity.into());
 
                     for i in 0..arity.into() {
-                        if let parse::Term::Var(var) = &atom.functor_args()[i] {
+                        if let Term::Var(var) = &atom.atom_args()[i] {
                             atom_bound_flags.push(clause_bounded_vars.contains(var));
                         } else {
                             atom_bound_flags.push(true);
@@ -216,8 +218,8 @@ fn adorn_program(query: &Atom, defs: Defs) -> (Atom, Defs) {
                 }
 
                 // add all variables not bound to bounded vars
-                for arg in atom.functor_args() {
-                    if let parse::Term::Var(var) = arg {
+                for arg in atom.atom_args() {
+                    if let Term::Var(var) = arg {
                         if !clause_bounded_vars.contains(var) {
                             clause_bounded_vars.push(var.to_string())
                         }
@@ -228,7 +230,7 @@ fn adorn_program(query: &Atom, defs: Defs) -> (Atom, Defs) {
             clauses_.push(clause_);
         }
 
-        let adorned_rule_key = head_.functor_spec();
+        let adorned_rule_key = head_.atom_spec();
         adorned_defs.insert(
             adorned_rule_key,
             Rule {
@@ -242,28 +244,35 @@ fn adorn_program(query: &Atom, defs: Defs) -> (Atom, Defs) {
 }
 
 pub fn eval_query<DB: DBAux>(query: Atom, db_helper: &mut DB) -> QueryAnswer {
-    let query_rules: parse::Defs = collect_rules(&query, db_helper);
+    let query_rules =
+        collect_rules(&query, db_helper);
 
     if query_rules.is_empty() {
         /* try eval query as fact */
-        let answer = eval_db_fact(&query, HashMap::new(), db_helper);
+        let answer =
+            eval_db_fact(&query, HashMap::new(), db_helper);
         QueryAnswer { query, answer }
     } else {
         /* implies query is a rule */
-        let renamed_vars: Defs = analysis::rename_vars(query_rules);
-        let (adorned_query, adorned_rules) = adorn_program(&query, renamed_vars);
-        let strata = analysis::stratify_rules(adorned_rules).unwrap();
+        let renamed_vars: Defs =
+            analysis::rename_vars(query_rules);
+        let (adorned_query, adorned_rules) =
+            adorn_program(&query, renamed_vars);
+        let adorned_strata =
+            analysis::stratify_rules(adorned_rules).unwrap();
         let query_program = QueryProgram {
             query: adorned_query,
-            strata,
+            strata: adorned_strata,
         };
-        let mut query_result = initialize_query_result(&query_program);
+        let mut query_result =
+            initialize_query_result(&query_program);
         eval_until_fixpoint(&query_program, &mut query_result, db_helper);
         // println!("{query_program:?}");
         // println!("{query_result:?}");
-        let answer = query_result
+        let answer =
+            query_result
             .answers
-            .get(&(query_program.query.functor_spec()))
+            .get(&(query_program.query.atom_spec()))
             .unwrap()
             .iter()
             .filter_map(|atom| unify::unify(&query_program.query, atom))
@@ -289,20 +298,22 @@ fn initialize_query_result(program: &QueryProgram) -> QueryResult {
     // We cannot say this about rule body atoms (below).
     let mut stack = vec![program.query.clone()];
     while let Some(atom) = stack.pop() {
+        let atom_spec = atom.atom_spec();
+
         for stratum in program.strata.iter() {
-            let atom_spec = atom.functor_spec();
             if let Some(rule) = stratum.get(&atom_spec) {
                 if let Some(bindings) = unify::unify(&rule.head, &atom) {
                     let set = inputs.get_mut(&atom_spec).unwrap();
+
                     if set.is_empty() {
                         set.push(unify::filter_bound(&bindings));
                     }
 
                     for clause in rule.clauses.iter() {
-                        for atom_ in clause.iter() {
-                            if let Some(set) = inputs.get(&atom_.functor_spec()) {
+                        for atom in clause.iter() {
+                            if let Some(set) = inputs.get(&atom.atom_spec()) {
                                 if set.is_empty() {
-                                    stack.push(unify::substitute_bindings(atom_, &bindings));
+                                    stack.push(unify::substitute_bindings(atom, &bindings));
                                 }
                             }
                         }
@@ -330,7 +341,7 @@ fn eval_until_fixpoint<DB: DBAux>(
             result.inputs_changed = false;
             result.answers_changed = false;
 
-            eval_program(&program.strata, stratum, result, db_helper);
+            eval_stratum(&program.strata, stratum, result, db_helper);
 
             if !result.inputs_changed && !result.answers_changed {
                 break;
@@ -339,7 +350,7 @@ fn eval_until_fixpoint<DB: DBAux>(
     }
 }
 
-fn eval_program<DB: DBAux>(
+fn eval_stratum<DB: DBAux>(
     strata: &Strata,
     stratum: &Defs,
     result: &mut QueryResult,
@@ -348,7 +359,8 @@ fn eval_program<DB: DBAux>(
     for (atom_spec, rule) in stratum.iter() {
         let mut derived_atoms = HashSet::new();
 
-        let inputs = result
+        let inputs =
+            result
             .inputs
             .get(atom_spec)
             .unwrap()
@@ -357,14 +369,34 @@ fn eval_program<DB: DBAux>(
             .collect::<Vec<_>>();
 
         for input_bindings in inputs {
-            for output_bindings in
-                eval_rule(strata, stratum, result, db_helper, &rule, input_bindings)
-            {
-                derived_atoms.insert(unify::substitute_bindings(&rule.head, &output_bindings));
+            let outputs =
+                rule
+                .clauses
+                .iter()
+                .flat_map(|clause| {
+                    eval_rule_body(
+                        strata,
+                        stratum,
+                        result,
+                        db_helper,
+                        &clause[..],
+                        input_bindings.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            for output_bindings in outputs {
+                derived_atoms
+                .insert(unify::substitute_bindings(&rule.head, &output_bindings));
             }
         }
 
-        let set = result.answers.get_mut(atom_spec).unwrap();
+        let set =
+            result
+            .answers
+            .get_mut(atom_spec)
+            .unwrap();
+
         for derived_atom in derived_atoms {
             if set.insert(derived_atom) {
                 result.answers_changed = true;
@@ -373,31 +405,7 @@ fn eval_program<DB: DBAux>(
     }
 }
 
-fn eval_rule<DB: DBAux>(
-    strata: &Strata,
-    stratum: &Defs,
-    result: &mut QueryResult,
-    db_helper: &mut DB,
-    rule: &Rule,
-    input_bindings: Bindings,
-) -> Vec<Bindings> {
-    let mut output_bindings = vec![];
-
-    for clause in rule.clauses.iter() {
-        output_bindings.extend(eval_body(
-            strata,
-            stratum,
-            result,
-            db_helper,
-            &clause[..],
-            input_bindings.clone(),
-        ));
-    }
-
-    output_bindings
-}
-
-fn eval_body<DB: DBAux>(
+fn eval_rule_body<DB: DBAux>(
     strata: &Strata,
     stratum: &Defs,
     result: &mut QueryResult,
@@ -409,7 +417,7 @@ fn eval_body<DB: DBAux>(
         eval_atom(strata, stratum, result, db_helper, atom, bindings.clone())
             .into_iter()
             .flat_map(|bindings| {
-                eval_body(strata, stratum, result, db_helper, &atoms[1..], bindings)
+                eval_rule_body(strata, stratum, result, db_helper, &atoms[1..], bindings)
             })
             .collect()
     } else {
@@ -425,26 +433,32 @@ fn eval_atom<DB: DBAux>(
     atom: &Atom,
     bindings: Bindings,
 ) -> Vec<Bindings> {
-    // find rule in strata
-    let atom_spec = atom.functor_spec();
-    let mut rule_opt = None;
-    for stratum in strata.iter() {
-        if let Some(rule) = stratum.get(&atom_spec) {
-            rule_opt = Some(rule);
-            break;
+    let atom_spec = atom.atom_spec();
+    let find_rule = {
+        let mut rule_opt = None;
+        for stratum in strata.iter() {
+            if let Some(rule) = stratum.get(&atom_spec) {
+                rule_opt = Some(rule);
+                break;
+            }
         }
-    }
-
-    let atom_bindings = if let Some(rule) = rule_opt {
-        let mut rule_bindings = vec![];
-
+        rule_opt
+    };
+    let atom_bindings = if let Some(rule) = find_rule {
         // new sub-query case
         if stratum.contains_key(&atom_spec) {
-            let set = result.inputs.get_mut(&atom_spec).unwrap();
-
-            let atom_ = unify::substitute_bindings(atom, &bindings);
-            let bindings_ = unify::unify(&rule.head, &atom_).unwrap();
-            let new = unify::filter_bound(&bindings_);
+            let set =
+                result
+                .inputs
+                .get_mut(&atom_spec)
+                .unwrap();
+            let atom_ =
+                unify::substitute_bindings(atom, &bindings);
+            let bindings_ =
+                unify::unify(&rule.head, &atom_)
+                .unwrap();
+            let new =
+                unify::filter_bound(&bindings_);
 
             if !set.contains(&new) {
                 set.push(new);
@@ -457,20 +471,29 @@ fn eval_atom<DB: DBAux>(
             // }
         }
 
-        let answers = result.answers.get(&atom_spec).unwrap();
+        let answers =
+            result
+            .answers
+            .get(&atom_spec)
+            .unwrap();
 
-        rule_bindings.extend(
+        let rule_bindings =
             answers
-                .iter()
-                .filter_map(|answer| unify::unify_with_bindings(atom, answer, bindings.clone())),
-        );
+            .iter()
+            .filter_map(|answer| {
+                unify::unify_with_bindings(atom, answer, bindings.clone())
+            })
+            .collect::<Vec<_>>();
 
         rule_bindings
     } else {
-        eval_db_fact(atom, bindings.clone(), db_helper)
+        let fact_bindings =
+            eval_db_fact(atom, bindings.clone(), db_helper);
+
+        fact_bindings
     };
 
-    return if atom.functor_negated() {
+    return if atom.atom_negated() {
         if atom_bindings.is_empty() {
             vec![bindings]
         } else {
@@ -482,14 +505,15 @@ fn eval_atom<DB: DBAux>(
 }
 
 fn eval_db_fact<DB: DBAux>(atom: &Atom, bindings: Bindings, db_helper: &mut DB) -> Vec<Bindings> {
-    let mut result_bindings = vec![];
-    let search_term = unify::substitute_bindings(atom, &bindings);
-    result_bindings.extend(
-        db_helper
-            .lookup(search_term)
-            .filter_map(|(_, fact)| unify::unify_with_bindings(atom, &fact, bindings.clone())),
-    );
-    result_bindings
+    let search_term =
+        unify::substitute_bindings(atom, &bindings);
+
+    db_helper
+    .lookup(search_term)
+    .filter_map(|(_, fact)| {
+        unify::unify_with_bindings(atom, &fact, bindings.clone())
+    })
+    .collect::<Vec<_>>()
 }
 
 #[cfg(test)]
@@ -498,12 +522,13 @@ mod tests {
     use crate::lang::analysis;
     use crate::lang::parse::parse_program;
     use crate::lang::parse::Parser;
-    use crate::lang::parse::TypedStatement;
+    use crate::lang::parse::Statement;
+    use crate::lang::parse::AssertionKind;
     use crate::lang::scan::Scanner;
 
     #[derive(Debug)]
     struct TestDBAux {
-        defs: parse::Defs,
+        defs: HashMap<(String, u8), Rule>,
         facts: Vec<Atom>,
         query: Option<Atom>,
     }
@@ -513,21 +538,44 @@ mod tests {
             let scanner = Scanner::new(program);
             let mut parser = Parser::new(scanner);
             let program = parse_program(&mut parser)?;
-            let typed_program = analysis::typecheck(program)?;
 
+            let mut defs: HashMap<(String, u8), Rule> = HashMap::new();
             let mut facts = vec![];
             let mut query = None;
 
-            for stmt in typed_program.statements {
+            for stmt in program {
                 match stmt {
-                    TypedStatement::Fact(atom) => facts.push(atom),
-                    TypedStatement::Query(atom) => query = Some(atom),
-                    _ => continue,
+                    Statement::Assertion(kind) => {
+                        match kind {
+                            AssertionKind::Fact { head} => {
+                                facts.push(head);
+                            },
+                            AssertionKind::RuleClause { head, body } => {
+                                let name = head.atom_name();
+                                let arity = head.atom_arity();
+
+                                defs
+                                .entry((name.into(), arity))
+                                .and_modify(|rule| {
+                                    rule
+                                    .clauses
+                                    .push(body.clone());
+                                })
+                                .or_insert(Rule { head, clauses: vec![body]});
+                            },
+                        }
+                    },
+                    Statement::Query(term) => {
+                        query = Some(term);
+                    },
+                    Statement::Retraction(kind) => {
+                        unreachable!();
+                    },
                 }
             }
 
             Ok(TestDBAux {
-                defs: typed_program.defs,
+                defs,
                 facts,
                 query,
             })
@@ -535,8 +583,8 @@ mod tests {
     }
 
     impl DBAux for TestDBAux {
-        fn get_rule(&self, name: &str, arity: u8) -> Option<Vec<parse::Literal>> {
-            self.defs.get(&(name.to_string(), arity)).cloned()
+        fn get_rule(&self, name: &str, arity: u8) -> Option<Rule> {
+            self.defs.get(&(name.into(), arity)).cloned()
         }
 
         fn lookup(&mut self, _search_term: Atom) -> Box<dyn Iterator<Item = (u32, Atom)>> {
@@ -552,16 +600,16 @@ mod tests {
         }
     }
 
-    fn atom(name: &str) -> parse::Term {
-        parse::Term::Atom(name.to_string())
+    fn symbol(name: &str) -> Term {
+        Term::Sym(name.to_string())
     }
 
-    fn var(name: &str) -> parse::Term {
-        parse::Term::Var(name.to_string())
+    fn var(name: &str) -> Term {
+        Term::Var(name.to_string())
     }
 
-    fn functor(name: &str, args: Vec<parse::Term>) -> parse::Term {
-        parse::Term::Functor(name.to_string(), args, false)
+    fn atom(name: &str, args: Vec<Term>) -> Term {
+        Term::Atom(name.to_string(), args, false)
     }
 
     #[test]
@@ -579,10 +627,10 @@ mod tests {
             vec![(
                 format!("{}/{}", "b", 3),
                 Rule {
-                    head: functor("b", vec![var("v1"), var("v2"), var("v3")]),
+                    head: atom("b", vec![var("v1"), var("v2"), var("v3")]),
                     clauses: vec![vec![
-                        functor("a", vec![var("v1"), var("v2")]),
-                        functor("b", vec![var("v4"), var("v3")]),
+                        atom("a", vec![var("v1"), var("v2")]),
+                        atom("b", vec![var("v4"), var("v3")]),
                     ]],
                 },
             )]
@@ -605,25 +653,25 @@ mod tests {
     //     let renamed_defs = rename_vars(db_helper.defs);
     //     let got = adorn_program(&db_helper.query.unwrap(), renamed_defs);
     //     let want = QueryProgram {
-    //         adorned_query: functor("b_bf", vec![atom("a"), var("Y")]),
+    //         adorned_query: atom("b_bf", vec![atom("a"), var("Y")]),
     //         adorned_defs:
     //             HashMap::from_iter(vec![
     //                 (format!("{}/{}", "b_bf", 2), Rule {
-    //                     head: functor("b_bf", vec![var("v1_bf"), var("v2_bf")]),
+    //                     head: atom("b_bf", vec![var("v1_bf"), var("v2_bf")]),
     //                     clauses: vec![vec![
-    //                         functor("a", vec![var("v1_bf"), var("v3_bf")]),
-    //                         functor("a", vec![var("v3_bf"), var("v2_bf")]),
-    //                         functor("succeed_", vec![]),
+    //                         atom("a", vec![var("v1_bf"), var("v3_bf")]),
+    //                         atom("a", vec![var("v3_bf"), var("v2_bf")]),
+    //                         atom("succeed_", vec![]),
     //                     ]],
     //                 }),
     //                 (format!("{}/{}", "succeed_", 0), Rule {
-    //                     head: functor("succeed_", vec![]),
+    //                     head: atom("succeed_", vec![]),
     //                     clauses: vec![
-    //                         vec![functor("true_", vec![])],
+    //                         vec![atom("true_", vec![])],
     //                     ],
     //                 }),
     //                 (format!("{}/{}", "true_", 0), Rule {
-    //                     head: functor("true_", vec![]),
+    //                     head: atom("true_", vec![]),
     //                     clauses: vec![vec![]],
     //                 }),
     //             ].into_iter()),
@@ -643,23 +691,23 @@ mod tests {
     //     let renamed_defs = rename_vars(db_helper.defs);
     //     let got = adorn_program(&db_helper.query.unwrap(), renamed_defs);
     //     let want = QueryProgram {
-    //         adorned_query: functor("b_bf", vec![atom("a"), var("Y")]),
+    //         adorned_query: atom("b_bf", vec![atom("a"), var("Y")]),
     //         adorned_defs:
     //             HashMap::from_iter(vec![
     //                 (format!("{}/{}", "b_ff", 2), Rule {
-    //                     head: functor("b_ff", vec![var("v1_ff"), var("v2_ff")]),
+    //                     head: atom("b_ff", vec![var("v1_ff"), var("v2_ff")]),
     //                     clauses: vec![vec![
-    //                         functor("a", vec![var("v1_ff"), var("v3_ff")]),
-    //                         functor("a", vec![var("v3_ff"), var("v2_ff")]),
-    //                         functor("b_ff", vec![var("v4_ff"), var("v5_ff")]),
+    //                         atom("a", vec![var("v1_ff"), var("v3_ff")]),
+    //                         atom("a", vec![var("v3_ff"), var("v2_ff")]),
+    //                         atom("b_ff", vec![var("v4_ff"), var("v5_ff")]),
     //                     ]],
     //                 }),
     //                 (format!("{}/{}", "b_bf", 2), Rule {
-    //                     head: functor("b_bf", vec![var("v1_bf"), var("v2_bf")]),
+    //                     head: atom("b_bf", vec![var("v1_bf"), var("v2_bf")]),
     //                     clauses: vec![vec![
-    //                         functor("a", vec![var("v1_bf"), var("v3_bf")]),
-    //                         functor("a", vec![var("v3_bf"), var("v2_bf")]),
-    //                         functor("b_ff", vec![var("v4_bf"), var("v5_bf")]),
+    //                         atom("a", vec![var("v1_bf"), var("v3_bf")]),
+    //                         atom("a", vec![var("v3_bf"), var("v2_bf")]),
+    //                         atom("b_ff", vec![var("v4_bf"), var("v5_bf")]),
     //                     ]],
     //                 }),
     //             ].into_iter()),
@@ -693,8 +741,8 @@ mod tests {
         assert_eq!(
             answer.get_atoms(),
             HashSet::from([
-                functor("reachable", vec![atom("b"), atom("c")]),
-                functor("reachable", vec![atom("b"), atom("d")]),
+                atom("reachable", vec![symbol("b"), symbol("c")]),
+                atom("reachable", vec![symbol("b"), symbol("d")]),
             ])
         );
         Ok(())
@@ -720,13 +768,13 @@ mod tests {
         assert_eq!(
             answer.get_atoms(),
             HashSet::from([
-                functor("reachable", vec![atom("a"), atom("b")]),
-                functor("reachable", vec![atom("a"), atom("c")]),
-                functor("reachable", vec![atom("a"), atom("d")]),
-                functor("reachable", vec![atom("b"), atom("c")]),
-                functor("reachable", vec![atom("b"), atom("d")]),
-                functor("reachable", vec![atom("c"), atom("c")]),
-                functor("reachable", vec![atom("c"), atom("d")]),
+                atom("reachable", vec![symbol("a"), symbol("b")]),
+                atom("reachable", vec![symbol("a"), symbol("c")]),
+                atom("reachable", vec![symbol("a"), symbol("d")]),
+                atom("reachable", vec![symbol("b"), symbol("c")]),
+                atom("reachable", vec![symbol("b"), symbol("d")]),
+                atom("reachable", vec![symbol("c"), symbol("c")]),
+                atom("reachable", vec![symbol("c"), symbol("d")]),
             ])
         );
         Ok(())
@@ -770,10 +818,10 @@ mod tests {
         assert_eq!(
             answer.get_atoms(),
             HashSet::from([
-                functor("link", vec![atom("a"), atom("b")]),
-                functor("link", vec![atom("b"), atom("c")]),
-                functor("link", vec![atom("c"), atom("c")]),
-                functor("link", vec![atom("c"), atom("d")]),
+                atom("link", vec![symbol("a"), symbol("b")]),
+                atom("link", vec![symbol("b"), symbol("c")]),
+                atom("link", vec![symbol("c"), symbol("c")]),
+                atom("link", vec![symbol("c"), symbol("d")]),
             ])
         );
         Ok(())
@@ -787,7 +835,7 @@ mod tests {
             link(y,z).
 
             node(X) :- link(X, Y).
-            node(Y) :- link(X, Y).
+            node(X) :- link(Y, X).
             reachable(X, Y) :- link(X, Y).
             reachable(X, Y) :- link(X, Z), reachable(Z, Y).
             unreachable(X, Y) :- node(X), node(Y), not reachable(X, Y).
@@ -800,9 +848,9 @@ mod tests {
         assert_eq!(
             answer.get_atoms(),
             HashSet::from([
-                functor("unreachable", vec![atom("z"), atom("z")]),
-                functor("unreachable", vec![atom("z"), atom("y")]),
-                functor("unreachable", vec![atom("z"), atom("x")]),
+                atom("unreachable", vec![symbol("z"), symbol("z")]),
+                atom("unreachable", vec![symbol("z"), symbol("y")]),
+                atom("unreachable", vec![symbol("z"), symbol("x")]),
             ])
         );
         Ok(())
@@ -828,7 +876,7 @@ mod tests {
         let answer = eval_query(db_helper.query.clone().unwrap(), &mut db_helper);
         assert_eq!(
             answer.get_atoms(),
-            HashSet::from([functor("indirect", vec![atom("x"), atom("z")]),])
+            HashSet::from([atom("indirect", vec![symbol("x"), symbol("z")]),])
         );
         Ok(())
     }

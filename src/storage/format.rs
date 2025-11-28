@@ -1,10 +1,9 @@
-use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
 use std::mem;
 use std::str;
 
 use crate::errors;
-use crate::lang::parse::Term;
+use crate::lang::Term;
 
 pub const BYTE_SIZE: usize = mem::size_of::<u8>();
 pub const U16_SIZE: usize = mem::size_of::<u16>();
@@ -33,24 +32,17 @@ pub const FIRST_RULE_SEQ: u16 = 1 << 15;
 pub const NEXT_PREFIX_SEQ: u8 = 0;
 pub const NEXT_TUP_SEQ: u8 = 1;
 
-/// DECL makes up the namespace for facts and rules
-
-/// Declarations (facts + rules)
-/// Key: Tuple(string, u8)
-/// Val: u16 (prefix code)
+/// Declarations of facts + rules (same namespace)
+/// Key: [string] [u8]
+/// Val: [u16]
 ///
-/// examples:
-///     link/2 -> 0x0042
-///     path/2 -> 0xFEFE
-///
-/// The key is the name and arity of the predicate. The value is a 2 byte prefix
-/// to identify the predicate when referencing in other column families. Facts
-/// are between [0, 2^15) and rules are ranged [2^15, 2^16).
+/// The key is the name/arity of the atom. Facts are between [0, 2^15) and rules
+/// are between [2^15, 2^16).
 pub const DECL: &'static str = "decl";
 
 /// Reverse lookup of prefix codes
-/// Key: u16 (prefix code)
-/// Val: string
+/// Key: [u16]
+/// Val: [string]
 ///
 /// This is useful in cases where you have the prefix code and want to get the
 /// name associated with it.
@@ -62,73 +54,35 @@ pub const RVLK: &'static str = "rvlk";
 /// greater than or equal 1 << 15 denoting rules and less than 1 << 15 denoting
 /// facts. In other words, a 1 in the high order bit flags a rule, a 0 flags
 /// a fact.
-/// Key: NEXT_PREFIX_SEQ
-/// Val: u16
+/// Key: [NEXT_PREFIX_SEQ]
+/// Val: [u16]
 ///
 /// Holds the next tuple id as a 4 byte number.
-/// Key: NEXT_TUP_SEQ
-/// Val: u32
+/// Key: [NEXT_TUP_SEQ]
+/// Val: [u32]
 ///
 pub const META: &'static str = "meta";
 
-/// Atom Schemas
-/// Key: u16 (prefix code)
-/// Val: AtomSpec bincode
-///
-/// example:
-///     0x0042 -> vec![ATOM_TYPE, ATOM_TYPE]
-///
-/// The key is the 2 byte prefix code for the predicate. The value is a string
-/// of u8 numbers, each denoting a type for the respective arg of the predicate.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct AtomSpec {
-    pub schema: Vec<u8>,
-    pub labels: Vec<String>,
-    pub indexes: Vec<Vec<u8>>,
-}
-
-impl AtomSpec {
-    pub fn encode(spec: &AtomSpec) -> Result<Vec<u8>, anyhow::Error> {
-        let result = bincode::serde::encode_to_vec(spec, bincode::config::standard())?;
-        Ok(result)
-    }
-
-    pub fn decode(slice: &[u8]) -> Result<AtomSpec, anyhow::Error> {
-        let (result, _) = bincode::serde::decode_from_slice(slice, bincode::config::standard())?;
-        Ok(result)
-    }
-}
-
-pub const SCM: &'static str = "scm";
-
-/// Definitions (rules)
-/// Key: u16
-/// Val: UTF-8 String
-///
-/// assuming path/2 has prefix 0xFEFE
-/// example:
-///     0xFEFE -> "path(X,Y) :- link(X, Y). path(X,Z) :- link(X, Y), path(Y, Z)."
-///
-/// The key is the 2 byte prefix code for the predicate. The value is the
-/// collection of all rule definitions for path/2 it can find.
+/// Definitions (rules text)
+/// Key: [u16]
+/// Val: [string]
 pub const DEF: &'static str = "def";
 
-/// Tuples (data)
-/// Key: [prefix] [tuple id]
-/// Val: [encoded value]
+/// Tuples (term data)
+/// Key: [u16] [u32]
+/// Val: [encoded term data]
 ///
 /// example:
 ///     0x0042 42 -> (a, b)
 ///
-/// The key is the 2 byte prefix code followed by the id. The value is a string
-/// of u8 numbers representing the tuple args. The example represents:
-///   link(a, b) with id=42
+/// The key is the prefix code followed by the tuple id.
 pub const TUP: &'static str = "tup";
 
-/// Indices
+/// TODO: Not used with functors yet
+///
+/// Indexes
 /// Key: [prefix] [index] [encoded value] [tuple id]
 /// Val: [tuple id]
-///
 pub const IDX: &'static str = "idx";
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -389,7 +343,7 @@ impl TaggedVal {
 impl From<TaggedVal> for Term {
     fn from(p: TaggedVal) -> Term {
         match p {
-            TaggedVal::Atom(s) => Term::Atom(s),
+            TaggedVal::Atom(s) => Term::Sym(s),
             TaggedVal::Str(s) => Term::Str(s),
             TaggedVal::Int(i) => Term::Int(i),
         }
@@ -399,7 +353,7 @@ impl From<TaggedVal> for Term {
 impl From<&Term> for TaggedVal {
     fn from(t: &Term) -> Self {
         match t {
-            Term::Atom(s) => TaggedVal::Atom(s.to_string()),
+            Term::Sym(s) => TaggedVal::Atom(s.to_string()),
             Term::Str(s) => TaggedVal::Str(s.to_string()),
             Term::Int(i) => TaggedVal::Int(*i),
             _ => unreachable!(),

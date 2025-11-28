@@ -26,7 +26,6 @@ pub enum Token {
     RP,
     LT,
     GT,
-    Decl,
     /* keywords */
     Not,
     /* end of file */
@@ -43,7 +42,6 @@ impl PartialEq for Token {
                 true
             }
             // zero payload variants
-            (Decl, Decl)
             | (Assertion, Assertion)
             | (Retraction, Retraction)
             | (Query, Query)
@@ -76,7 +74,6 @@ impl fmt::Display for Token {
             Var(_) => write!(f, "var"),
             Integer(_) => write!(f, "integer"),
             /* punctuation */
-            Decl => write!(f, "#!"),
             Assertion => write!(f, "."),
             Retraction => write!(f, "!"),
             Query => write!(f, "?"),
@@ -156,15 +153,10 @@ impl<'a> Scanner<'a> {
                     }
                 }
                 '#' => {
-                    if let Some('!') = self.iterable.peek() {
-                        self.iterable.next();
-                        return Ok(Decl);
-                    } else {
-                        self.iterable.next();
-                        let _ = iter::from_fn(|| self.iterable.next_if(|s| *s != '\n'))
-                            .collect::<String>();
-                        continue;
-                    }
+                    self.iterable.next();
+                    let _ = iter::from_fn(|| self.iterable.next_if(|s| *s != '\n'))
+                        .collect::<String>();
+                    continue;
                 }
                 /* start of variables */
                 'A'..='Z' | '_' => {

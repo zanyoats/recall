@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::lang::parse::Term;
+use crate::lang::Term;
 
 pub type Bindings = HashMap<String, Term>;
 pub type BindingPair = (String, Term);
@@ -48,7 +48,7 @@ fn get_bound_var(x: &str, bindings: &Bindings) -> Option<Term> {
     if let Some(term) = bindings.get(x) {
         match term {
             Var(x) => get_bound_var(x, bindings),
-            Functor(_, _, _) => unreachable!(),
+            Atom(_, _, _) => unreachable!(),
             _ => Some(term.clone()),
         }
     } else {
@@ -76,12 +76,12 @@ pub fn substitute_bindings(term: &Term, bindings: &Bindings) -> Term {
             || Var(val.clone()),
             |term| substitute_bindings(&term, bindings),
         ),
-        Functor(name, terms, negated) => {
+        Atom(name, terms, negated) => {
             let terms: Vec<Term> = terms
                 .into_iter()
                 .map(|term| substitute_bindings(term, bindings))
                 .collect();
-            Functor(name.clone(), terms, *negated)
+            Atom(name.clone(), terms, *negated)
         }
         _ => term.clone(),
     }
@@ -95,12 +95,12 @@ fn unify_terms(t0: &Term, t1: &Term, bindings: &mut Bindings) -> bool {
     use Term::*;
 
     match (t0, t1) {
-        (Atom(x), Atom(y)) => x == y,
+        (Sym(x), Sym(y)) => x == y,
         (Str(x), Str(y)) => x == y,
         (Int(x), Int(y)) => x == y,
         (Var(x), _) => unify_var(x, t1, bindings),
         (_, Var(y)) => unify_var(y, t0, bindings),
-        (Functor(name0, terms0, _), Functor(name1, terms1, _)) => {
+        (Atom(name0, terms0, _), Atom(name1, terms1, _)) => {
             name0 == name1
                 && terms0.len() == terms1.len()
                 && terms0
@@ -144,7 +144,7 @@ fn occurs_check(x: &str, term: &Term, bindings: &mut Bindings) -> bool {
             Some(term) => occurs_check(x, &term, bindings),
             None => false,
         },
-        Term::Functor(_, terms, _) => terms.iter().any(|term| occurs_check(x, term, bindings)),
+        Term::Atom(_, terms, _) => terms.iter().any(|term| occurs_check(x, term, bindings)),
         _ => false,
     }
 }
@@ -160,8 +160,8 @@ mod tests {
     fn it_unifies_simple_terms() {
         {
             let mut bindings = HashMap::new();
-            let t1 = Atom("foo".to_string());
-            let t2 = Atom("foo".to_string());
+            let t1 = Sym("foo".to_string());
+            let t2 = Sym("foo".to_string());
             assert!(unify_terms(&t1, &t2, &mut bindings));
             assert!(bindings.is_empty());
         }
@@ -179,11 +179,11 @@ mod tests {
         {
             let mut bindings = HashMap::new();
             let t1 = Var("X".to_string());
-            let t2 = Atom("foo".to_string());
+            let t2 = Sym("foo".to_string());
             assert!(unify_terms(&t1, &t2, &mut bindings));
             assert_eq!(bindings.len(), 1);
             let term = bindings.get("X").unwrap();
-            assert!(matches!(term, Atom(val) if val == "foo"));
+            assert!(matches!(term, Sym(val) if val == "foo"));
         }
 
         {
@@ -196,8 +196,8 @@ mod tests {
 
         {
             let mut bindings = HashMap::new();
-            let t1 = Functor("foo".to_string(), vec![Var("X".to_string())], false);
-            let t2 = Functor("foo".to_string(), vec![Var("X".to_string())], false);
+            let t1 = Atom("foo".to_string(), vec![Var("X".to_string())], false);
+            let t2 = Atom("foo".to_string(), vec![Var("X".to_string())], false);
             assert!(unify_terms(&t1, &t2, &mut bindings));
             assert!(bindings.is_empty());
         }
@@ -214,22 +214,22 @@ mod tests {
 
         {
             let mut bindings = HashMap::new();
-            let t1 = Atom("foo".to_string());
-            let t2 = Atom("bar".to_string());
+            let t1 = Sym("foo".to_string());
+            let t2 = Sym("bar".to_string());
             assert!(!unify_terms(&t1, &t2, &mut bindings));
         }
 
         {
             let mut bindings = HashMap::new();
-            let t1 = Functor("foo".to_string(), vec![Atom("foo".to_string())], false);
-            let t2 = Functor("foo".to_string(), vec![Atom("bar".to_string())], false);
+            let t1 = Atom("foo".to_string(), vec![Sym("foo".to_string())], false);
+            let t2 = Atom("foo".to_string(), vec![Sym("bar".to_string())], false);
             assert!(!unify_terms(&t1, &t2, &mut bindings));
         }
     }
 
     #[test]
     fn it_unifies_complex_terms() {
-        let t0 = Functor(
+        let t0 = Atom(
             "foo".to_string(),
             vec![
                 Var("X".to_string()),
@@ -238,12 +238,12 @@ mod tests {
             ],
             false,
         );
-        let t1 = Functor(
+        let t1 = Atom(
             "foo".to_string(),
             vec![
                 Var("Y".to_string()),
-                Functor("bar".to_string(), vec![Var("Z".to_string())], false),
-                Atom("foo".to_string()),
+                Atom("bar".to_string(), vec![Var("Z".to_string())], false),
+                Sym("foo".to_string()),
             ],
             false,
         );
@@ -256,24 +256,24 @@ mod tests {
         assert!(matches!(x_binding, Var(val) if val == "Y"));
         assert!(matches!(
             y_binding,
-            Functor(name, args, _)
+            Atom(name, args, _)
                 if name == "bar"
                 && args.len() == 1
                 && matches!(&args[0], Var(val) if val == "Z")
         ));
-        assert!(matches!(z_binding, Atom(val) if val == "foo"));
+        assert!(matches!(z_binding, Sym(val) if val == "foo"));
     }
 
     #[test]
     fn it_fails_to_unify_complex_terms() {
-        let t0 = Functor(
+        let t0 = Atom(
             "foo".to_string(),
-            vec![Atom("apple".to_string()), Var("X".to_string())],
+            vec![Sym("apple".to_string()), Var("X".to_string())],
             false,
         );
-        let t1 = Functor(
+        let t1 = Atom(
             "foo".to_string(),
-            vec![Var("X".to_string()), Atom("lemon".to_string())],
+            vec![Var("X".to_string()), Sym("lemon".to_string())],
             false,
         );
         let mut bindings = HashMap::new();
@@ -282,28 +282,28 @@ mod tests {
 
     #[test]
     fn it_fails_to_unify_when_occurs_check() {
-        let t0 = Functor(
+        let t0 = Atom(
             "foo".to_string(),
-            vec![Functor(
+            vec![Atom(
                 "bar".to_string(),
                 vec![Var("X".to_string())],
                 false,
             )],
             false,
         );
-        let t1 = Functor("foo".to_string(), vec![Var("X".to_string())], false);
+        let t1 = Atom("foo".to_string(), vec![Var("X".to_string())], false);
         let mut bindings = HashMap::new();
         assert!(!unify_terms(&t0, &t1, &mut bindings));
     }
 
     #[test]
     fn it_unifies_mutual_variables() {
-        let t0 = Functor(
+        let t0 = Atom(
             "foo".to_string(),
             vec![Var("X".to_string()), Var("Y".to_string())],
             false,
         );
-        let t1 = Functor(
+        let t1 = Atom(
             "foo".to_string(),
             vec![Var("Y".to_string()), Var("X".to_string())],
             false,
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn it_unifies_recursive_variables() {
-        let t0 = Functor(
+        let t0 = Atom(
             "foo".to_string(),
             vec![
                 Var("X".to_string()),
@@ -327,12 +327,12 @@ mod tests {
             ],
             false,
         );
-        let t1 = Functor(
+        let t1 = Atom(
             "foo".to_string(),
             vec![
                 Var("Y".to_string()),
                 Var("Z".to_string()),
-                Atom("foo".to_string()),
+                Sym("foo".to_string()),
                 Var("R".to_string()),
             ],
             false,
@@ -346,13 +346,13 @@ mod tests {
         let r_binding = bindings.get("R").unwrap();
         assert!(matches!(x_binding, Var(val) if val == "Y"));
         assert!(matches!(y_binding, Var(val) if val == "Z"));
-        assert!(matches!(z_binding, Atom(val) if val == "foo"));
-        assert!(matches!(r_binding, Atom(val) if val == "foo"));
+        assert!(matches!(z_binding, Sym(val) if val == "foo"));
+        assert!(matches!(r_binding, Sym(val) if val == "foo"));
     }
 
     #[test]
     fn it_substitutes_bindings() {
-        let t0 = Functor(
+        let t0 = Atom(
             "foo".to_string(),
             vec![
                 Var("X".to_string()),
@@ -364,12 +364,12 @@ mod tests {
             ],
             false,
         );
-        let t1 = Functor(
+        let t1 = Atom(
             "foo".to_string(),
             vec![
                 Var("Y".to_string()),
                 Var("Z".to_string()),
-                Atom("foo".to_string()),
+                Sym("foo".to_string()),
                 Int(42),
                 Var("V".to_string()),
                 Var("U".to_string()),
@@ -380,12 +380,12 @@ mod tests {
         let term = substitute_bindings(&t0, &mut bindings);
         assert!(matches!(
             term,
-            Functor(name, args, _)
+            Atom(name, args, _)
                 if name == "foo"
                 && args.len() == 6
-                && matches!(&args[0], Atom(val) if val == "foo")
-                && matches!(&args[1], Atom(val) if val == "foo")
-                && matches!(&args[2], Atom(val) if val == "foo")
+                && matches!(&args[0], Sym(val) if val == "foo")
+                && matches!(&args[1], Sym(val) if val == "foo")
+                && matches!(&args[2], Sym(val) if val == "foo")
                 && matches!(&args[3], Int(val) if *val == 42)
                 && matches!(&args[4], Var(val) if val == "V")
                 && matches!(&args[5], Var(val) if val == "V")

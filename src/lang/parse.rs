@@ -1,117 +1,75 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
-
 use crate::errors::RecallError;
+use crate::lang::Atom;
+use crate::lang::Term;
 use crate::lang::scan::Scanner;
 use crate::lang::scan::Token;
 
-pub type FunctorTerm = Term;
-pub type Defs = HashMap<(String, u8), Vec<Literal>>;
-pub type Schemas = HashMap<(String, u8), Vec<u8>>;
-
-#[derive(Debug)]
-pub struct Program {
-    pub declarations: Vec<FunctorTerm>,
-    pub statements: Vec<Statement>,
-}
-
-#[derive(Debug)]
-pub struct TypedProgram {
-    pub defs: Defs,
-    pub facts: HashSet<(String, u8)>,
-    pub schemas: Schemas,
-    pub statements: Vec<TypedStatement>,
-}
+pub type Program = Vec<Statement>;
 
 #[derive(Debug)]
 pub enum Statement {
-    Assertion(Literal),
-    Retraction(Literal),
-    Query(FunctorTerm),
+    Assertion(AssertionKind),
+    Retraction(AssertionKind),
+    Query(Atom),
 }
 
 #[derive(Debug)]
-pub enum TypedStatement {
-    Fact(FunctorTerm),
-    Query(FunctorTerm),
-    Retraction(Literal),
+pub enum AssertionKind {
+    Fact { head: Atom },
+    RuleClause { head: Atom, body: Vec<Atom> },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Literal {
-    pub head: FunctorTerm,
-    pub body: Vec<FunctorTerm>,
-}
-
-impl Literal {
-    fn from_head(head: FunctorTerm) -> Self {
-        Literal { head, body: vec![] }
+fn is_zero_arity_rule(term: &Term) -> bool {
+    if let Term::Atom(_, args, _) = term {
+        args.len() == 0
+    } else {
+        unreachable!()
     }
-
-    pub fn is_rule(&self) -> bool {
-        self.body.len() > 0 || self.head.functor_arity() == 0
-    }
-
-    pub fn is_factlike_rule(&self) -> bool {
-        self.head.functor_arity() == 0 && self.body.len() == 0
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Term {
-    Atom(String),
-    Str(String),
-    Var(String),
-    Int(i32),
-    /// Grammar does not allow functor terms (at the moment). But this
-    /// is still useful for packaging functor terms into literals since
-    /// unification works on terms.
-    Functor(String, Vec<Term>, bool),
 }
 
 impl Term {
-    pub fn functor_parts(self) -> (String, Vec<Term>, bool) {
-        if let Term::Functor(name, args, negated) = self {
+    pub fn atom_parts(self) -> (String, Vec<Term>, bool) {
+        if let Term::Atom(name, args, negated) = self {
             (name, args, negated)
         } else {
             unreachable!()
         }
     }
 
-    pub fn functor_spec(&self) -> String {
-        if let Term::Functor(name, args, _) = self {
+    pub fn atom_spec(&self) -> String {
+        if let Term::Atom(name, args, _) = self {
             format!("{}/{}", name, args.len())
         } else {
             unreachable!()
         }
     }
 
-    pub fn functor_name(&self) -> &String {
-        if let Term::Functor(name, _, _) = self {
+    pub fn atom_name(&self) -> &String {
+        if let Term::Atom(name, _, _) = self {
             name
         } else {
             unreachable!()
         }
     }
 
-    pub fn functor_arity(&self) -> u8 {
-        if let Term::Functor(_, args, _) = self {
+    pub fn atom_arity(&self) -> u8 {
+        if let Term::Atom(_, args, _) = self {
             args.len().try_into().unwrap()
         } else {
             unreachable!()
         }
     }
 
-    pub fn functor_args(&self) -> &Vec<Term> {
-        if let Term::Functor(_, args, _) = self {
+    pub fn atom_args(&self) -> &Vec<Term> {
+        if let Term::Atom(_, args, _) = self {
             args
         } else {
             unreachable!()
         }
     }
 
-    pub fn functor_negated(&self) -> bool {
-        if let Term::Functor(_, _, negated) = self {
+    pub fn atom_negated(&self) -> bool {
+        if let Term::Atom(_, _, negated) = self {
             *negated
         } else {
             unreachable!()
@@ -130,65 +88,68 @@ impl<'a> Parser<'a> {
 }
 
 /// EBNF Grammar for Datalog
-/// <program>       ::= { <declaration> | <statement> }
-/// <declaration>   ::= "#!" <literal> "."
-/// <statement>     ::= | <literal> "?"
-///                     | <literal> "."
-///                     | <literal> "!"
-///                     | <literal> ":-" <body> "."
-///                     | <literal> ":-" <body> "!"
-/// <body>          ::= [ "not" ] <literal> { "," [ "not" ] <literal> }
-/// <literal>       ::= | <atom> [ "(" [ <terms> ] ")" ]
+/// <program>       ::= { <statement> }
+/// <statement>     ::= | <atom> "?"
+///                     | <atom> [ ":-" <body> ] "."
+///                     | <atom> [ ":-" <body> ] "!"
+/// <body>          ::= [ "not" ] <atom> { "," [ "not" ] <atom> }
+/// <atom>          ::= | <sym> [ "(" [ <terms> ] ")" ]
 ///                     | <str> [ "(" [ <terms> ] ")" ]
 /// <terms>         ::= <term> { "," <term> }
-/// <term>          ::= | <atom> [ "<" <var> ">" ]
+/// <term>          ::= | <sym>
 ///                     | <str>
+///                     | [ "+" | "-" ] <int>
 ///                     | <var>
-///                     | [ "+" | "-" ] <integer>
 
 pub fn parse_program<'a>(parser: &'a mut Parser) -> Result<Program, anyhow::Error> {
-    let mut declarations = vec![];
     let mut statements = vec![];
     Ok(loop {
         match parser.scanner.peek_token()? {
             Token::End => {
-                break Program {
-                    declarations,
-                    statements,
-                }
-            }
-            Token::Decl => {
-                expect_token(parser, Token::Decl)?;
-                declarations.push(parse_literal(parser, false)?);
-                expect_token(parser, Token::Assertion)?;
-                continue;
-            }
+                break statements
+            },
             _ => {
                 statements.push(parse_statement(parser)?);
                 continue;
-            }
+            },
         }
     })
 }
 
 fn parse_statement<'a>(parser: &'a mut Parser) -> Result<Statement, anyhow::Error> {
-    let head = parse_literal(parser, false)?;
+    let head = parse_atom(parser, false)?;
 
     match parser.scanner.next_token()? {
         Token::Query => Ok(Statement::Query(head)),
-        Token::Assertion => Ok(Statement::Assertion(Literal::from_head(head))),
-        Token::Retraction => Ok(Statement::Retraction(Literal::from_head(head))),
+        Token::Assertion => {
+            Ok(Statement::Assertion(
+                if is_zero_arity_rule(&head) {
+                    AssertionKind::RuleClause { head, body: vec![] }
+                } else {
+                    AssertionKind::Fact { head }
+                }
+            ))
+        },
+        Token::Retraction => {
+            Ok(Statement::Retraction(
+                if is_zero_arity_rule(&head) {
+                    AssertionKind::RuleClause { head, body: vec![] }
+                } else {
+                    AssertionKind::Fact { head }
+                }
+            ))
+        },
         Token::If => {
             let body = parse_body(parser)?;
 
             match parser.scanner.peek_token()? {
                 Token::Assertion => {
                     expect_token(parser, Token::Assertion)?;
-                    Ok(Statement::Assertion(Literal { head, body }))
+                    Ok(Statement::Assertion(AssertionKind::RuleClause { head, body }))
                 }
                 Token::Retraction => {
                     expect_token(parser, Token::Retraction)?;
-                    Ok(Statement::Retraction(Literal { head, body }))
+                    Ok(Statement::Retraction(AssertionKind::RuleClause { head, body }))
                 }
                 token => Err(RecallError::ParseError(format!(
                     "unexpected token '{}' when parsing statement",
@@ -205,7 +166,7 @@ fn parse_statement<'a>(parser: &'a mut Parser) -> Result<Statement, anyhow::Erro
     }
 }
 
-fn parse_body<'a>(parser: &'a mut Parser) -> Result<Vec<FunctorTerm>, anyhow::Error> {
+fn parse_body<'a>(parser: &'a mut Parser) -> Result<Vec<Atom>, anyhow::Error> {
     let mut negated = false;
 
     if let Token::Not = parser.scanner.peek_token()? {
@@ -213,7 +174,7 @@ fn parse_body<'a>(parser: &'a mut Parser) -> Result<Vec<FunctorTerm>, anyhow::Er
         parser.scanner.next_token()?;
     }
 
-    let mut result = vec![parse_literal(parser, negated)?];
+    let mut result = vec![parse_atom(parser, negated)?];
 
     while let Token::Comma = parser.scanner.peek_token()? {
         expect_token(parser, Token::Comma)?;
@@ -225,18 +186,18 @@ fn parse_body<'a>(parser: &'a mut Parser) -> Result<Vec<FunctorTerm>, anyhow::Er
             parser.scanner.next_token()?;
         }
 
-        result.push(parse_literal(parser, negated)?);
+        result.push(parse_atom(parser, negated)?);
     }
 
     Ok(result)
 }
 
-fn parse_literal<'a>(parser: &'a mut Parser, negated: bool) -> Result<FunctorTerm, anyhow::Error> {
+fn parse_atom<'a>(parser: &'a mut Parser, negated: bool) -> Result<Atom, anyhow::Error> {
     let name = match parse_term(parser)? {
-        Term::Atom(s) | Term::Str(s) => s,
+        Term::Sym(s) | Term::Str(s) => s,
         term => {
             return Err(RecallError::ParseError(format!(
-                "head position of literal needs to be an atom or str term, got {}",
+                "head position of literal needs to be an symbol or string, got {}",
                 term,
             ))
             .into())
@@ -257,7 +218,7 @@ fn parse_literal<'a>(parser: &'a mut Parser, negated: bool) -> Result<FunctorTer
         vec![]
     };
 
-    Ok(Term::Functor(name, args, negated))
+    Ok(Term::Atom(name, args, negated))
 }
 
 fn parse_terms<'a>(parser: &'a mut Parser) -> Result<Vec<Term>, anyhow::Error> {
@@ -273,29 +234,13 @@ fn parse_terms<'a>(parser: &'a mut Parser) -> Result<Vec<Term>, anyhow::Error> {
 
 fn parse_term<'a>(parser: &'a mut Parser) -> Result<Term, anyhow::Error> {
     match parser.scanner.next_token()? {
-        Token::Atom(s) => {
-            if let Token::LT = parser.scanner.peek_token()? {
-                expect_token(parser, Token::LT)?;
-
-                let token = parser.scanner.next_token()?;
-
-                if let Token::Var(_) = token {
-                    expect_token(parser, Token::GT)?;
-                    unimplemented!("Aggregated vars are not implemented")
-                } else {
-                    Err(RecallError::ParseError(format!(
-                        "expected variable term but got '{}'",
-                        token,
-                    ))
-                    .into())
-                }
-            } else {
-                Ok(Term::Atom(s))
-            }
-        }
+        /* <sym> */
+        Token::Atom(s) => Ok(Term::Sym(s)),
+        /* <str> */
         Token::Str(s) => Ok(Term::Str(s)),
-        Token::Var(s) => Ok(Term::Var(s)),
+        /* <int> */
         Token::Integer(n) => Ok(Term::Int(n)),
+        /* + <int> */
         Token::Plus => {
             let token = parser.scanner.next_token()?;
 
@@ -307,7 +252,8 @@ fn parse_term<'a>(parser: &'a mut Parser) -> Result<Term, anyhow::Error> {
                         .into(),
                 )
             }
-        }
+        },
+        /* - <int> */
         Token::Minus => {
             let token = parser.scanner.next_token()?;
 
@@ -319,7 +265,9 @@ fn parse_term<'a>(parser: &'a mut Parser) -> Result<Term, anyhow::Error> {
                         .into(),
                 )
             }
-        }
+        },
+        /* <var> */
+        Token::Var(s) => Ok(Term::Var(s)),
         token => Err(RecallError::ParseError(format!("expected term but got '{}'", token,)).into()),
     }
 }
@@ -344,7 +292,10 @@ mod tests {
     fn it_parses_valid_program() -> Result<(), anyhow::Error> {
         let program = "
             # example program
-            #! link(atom, atom).
+            true.
+            succeed :- true.
+            fail :- fruit(oats).
+            fruit(pear).
             link(a, b).
             link(b, c).
             link(c, c).
