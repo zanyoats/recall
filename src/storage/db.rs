@@ -20,7 +20,6 @@ use rocksdb::SingleThreaded;
 use crate::storage::format;
 use crate::storage::format::ValEncodable;
 use crate::storage::format::ValDecodable;
-use crate::errors;
 
 pub struct DB {
     db: Option<TransactionDB<SingleThreaded>>,
@@ -63,16 +62,29 @@ impl DB {
     }
 
     fn temp_path() -> Result<PathBuf, anyhow::Error> {
-        let mut path = std::env::temp_dir();
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
+        let base = std::env::temp_dir();
         let pid = process::id();
-        let unique_name = format!("recall_scratch_{}_{}", pid, timestamp);
-        path.push(unique_name);
-        fs::create_dir(&path)?;
-        Ok(path)
+        let mut attempt: u32 = 0;
+
+        loop {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let unique_name = format!("recall_scratch_{}_{}_{}", pid, timestamp, attempt);
+
+            let mut path = base.clone();
+            path.push(unique_name);
+
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(path),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    attempt = attempt.checked_add(1).unwrap();
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
 
     fn setup_db(path: &Path, persist: bool) -> Result<Self, anyhow::Error> {
@@ -124,7 +136,7 @@ impl DB {
         Ok(Self { db: Some(db), persist, path: path.to_path_buf() })
     }
 
-    pub fn begin_transaction(&self) -> TransactionOp {
+    pub fn begin_transaction(&self) -> TransactionOp<'_> {
         let mut txn_opts = TransactionOptions::default();
         txn_opts.set_snapshot(true);
         let write_opts = WriteOptions::default();
@@ -181,24 +193,6 @@ impl<'a> TransactionOp<'a> {
         let key = build_predicate_key(&name, arity);
 
         if let Some(prefix) = self.tx.get_cf(self.decl, &key)? {
-            let (prefix_code, _) = prefix.as_slice().decode_u16();
-
-            if is_rule {
-                if prefix_code < format::FIRST_RULE_SEQ {
-                    return Err(errors::RecallError::RuntimeError(format!(
-                        "cannot add rule since predicate {}/{} is a fact",
-                        name, arity,
-                    )).into())
-                }
-            } else {
-                if prefix_code >= format::FIRST_RULE_SEQ {
-                    return Err(errors::RecallError::RuntimeError(format!(
-                        "cannot add fact since predicate {}/{} is a rule",
-                        name, arity,
-                    )).into())
-                }
-            }
-
             Ok(prefix)
         } else {
             let current =

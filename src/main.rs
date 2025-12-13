@@ -324,7 +324,6 @@ fn help(program: &str) -> String {
     result.push_str("-h:            help\n");
     result.push_str("-v:            verbose (debug info)\n");
     result.push_str("-i:            info\n");
-    result.push_str("-d file:       read in declaration config (TOML) from file\n");
     result.push_str("-f file:       read in datalog program from file\n");
     result.push_str("-s '...':      read in datalog program from string\n");
     result.push_str("-c:            analysis only (check), prints out inferred declarations\n");

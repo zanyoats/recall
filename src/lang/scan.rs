@@ -153,7 +153,6 @@ impl<'a> Scanner<'a> {
                     }
                 }
                 '#' => {
-                    self.iterable.next();
                     let _ = iter::from_fn(|| self.iterable.next_if(|s| *s != '\n'))
                         .collect::<String>();
                     continue;

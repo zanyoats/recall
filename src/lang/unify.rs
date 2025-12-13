@@ -48,7 +48,7 @@ fn get_bound_var(x: &str, bindings: &Bindings) -> Option<Term> {
     if let Some(term) = bindings.get(x) {
         match term {
             Var(x) => get_bound_var(x, bindings),
-            Atom(_, _, _) => unreachable!(),
+            Atom(_, _, _) => Some(substitute_bindings(term, bindings)),
             _ => Some(term.clone()),
         }
     } else {

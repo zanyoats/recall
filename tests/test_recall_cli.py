@@ -6,7 +6,7 @@ import pytest
     # graph.pl
     ############################################################################
     pytest.param(
-        ["-d", "test.toml", "-f", "graph.pl", "-s", "reachable(X,Y)?"],
+        ["-f", "graph.pl", "-s", "reachable(X,Y)?"],
         {
             "reachable(x, y)",
             "reachable(y, z)",
@@ -15,12 +15,12 @@ import pytest
         id="graph-reacheable"
     ),
     pytest.param(
-        ["-d", "test.toml", "-f", "graph.pl", "-s", "indirect(X,Y)?"],
+        ["-f", "graph.pl", "-s", "indirect(X,Y)?"],
         {"indirect(x, z)"},
         id="graph-indirect",
     ),
     pytest.param(
-        ["-d", "test.toml", "-f", "graph.pl", "-s", "unreachable(X,Y)?"],
+        ["-f", "graph.pl", "-s", "unreachable(X,Y)?"],
         {
             "unreachable(x, x)",
             "unreachable(y, y)", "unreachable(y, x)",
@@ -32,19 +32,36 @@ import pytest
     # bare_rule.pl
     ############################################################################
     pytest.param(
-        ["-d", "test.toml", "-f", "bare_rule.pl", "-s", "all_fruits(X)?"],
+        ["-f", "bare_rule.pl", "-s", "all_fruits(X)?"],
         {"all_fruits(pear)"},
         id="bare_rule-all_fruits",
     ),
     pytest.param(
-        ["-d", "test.toml", "-f", "bare_rule.pl", "-s", "all_fruits2(X)?"],
+        ["-f", "bare_rule.pl", "-s", "all_fruits2(X)?"],
         {"all_fruits2(pear)"},
         id="bare_rule-all_fruits2",
     ),
     pytest.param(
-        ["-d", "test.toml", "-f", "bare_rule.pl", "-s", "all_fruits3(X)?"],
+        ["-f", "bare_rule.pl", "-s", "all_fruits3(X)?"],
         set(),
         id="bare_rule-all_fruits3",
+    ),
+    ############################################################################
+    # functors.pl
+    ############################################################################
+    pytest.param(
+        ["-f", "functors.pl", "-s", "num_fruits(Name, Num)?"],
+        {
+            "num_fruits(alice, s(s(z)))",
+            "num_fruits(bob, s(z))",
+            "num_fruits(dave, z)",
+        },
+        id="functors-num_fruits",
+    ),
+    pytest.param(
+        ["-f", "functors.pl", "-s", "num_fruits(alice, Num)?"],
+        {"num_fruits(alice, s(s(z)))"},
+        id="functors-num_fruits-bound",
     ),
 ])
 def test_recall_cli(args, expected):

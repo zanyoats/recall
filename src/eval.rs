@@ -95,14 +95,9 @@ impl<'txn> DBAux for TxnDBAux<'txn> {
     fn lookup(&mut self, search_term: Term) -> Box<dyn Iterator<Item = (u32, Term)>> {
         let name = search_term.atom_name();
         let arity = search_term.atom_arity();
-        let prefix =
-            self
-            .txn
-            .get_prefix(name, arity)
-            .unwrap() // todo handle errors
-            .unwrap(); // assumes a fact atom is always found
+        let prefix = self.txn.get_prefix(name, arity).unwrap(); // todo handle errors
 
-        let result =
+        let result = if let Some(prefix) = prefix {
             self
             .txn
             .query(prefix)
@@ -112,7 +107,10 @@ impl<'txn> DBAux for TxnDBAux<'txn> {
                 let term = Term::decode(&val).unwrap();
                 (tuple_id, term)
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
 
         Box::new(result.into_iter())
     }
@@ -129,10 +127,14 @@ pub fn batch_eval(
     for stmt in program {
         match stmt {
             Statement::Assertion(kind) => {
-                if let AssertionKind::Fact { head: term } = kind {
-                    evaluate_assertion(txn, &term)?;
-                } else {
-                    unreachable!()
+                match kind {
+                    AssertionKind::Fact { head: term } => {
+                        evaluate_assertion(txn, &term)?;
+                    }
+                    AssertionKind::RuleClause { .. } => {
+                        // rule definitions are already handled in `define_rules`
+                        continue;
+                    }
                 }
             },
             Statement::Query(term) => {
@@ -225,4 +227,92 @@ fn evaluate_retraction(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use crate::lang::parse::parse_program;
+    use crate::lang::parse::Parser;
+    use crate::lang::scan::Scanner;
+
+    #[test]
+    fn batch_eval_handles_zero_arity_rule_assertion() -> Result<(), anyhow::Error> {
+        let program_text = "
+            true.
+            succeed :- true.
+            succeed?
+        ";
+
+        let scanner = Scanner::new(program_text);
+        let mut parser = Parser::new(scanner);
+        let program = parse_program(&mut parser)?;
+
+        let db = db::DB::new_temp()?;
+        let txn = db.begin_transaction();
+        let answers = batch_eval(&txn, program)?;
+        txn.commit()?;
+
+        let atoms = answers
+            .into_iter()
+            .flat_map(|answer| answer.get_atoms().into_iter())
+            .collect::<HashSet<_>>();
+
+        assert_eq!(
+            atoms,
+            HashSet::from([Term::Atom("succeed".into(), vec![], false)])
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn batch_eval_handles_functor_len() -> Result<(), anyhow::Error> {
+        let program_text = {
+            let mut program = include_str!("../tests/functors.pl").to_string();
+            program.push_str("num_fruits(Name, Num)?");
+            program
+        };
+
+        let scanner = Scanner::new(&program_text);
+        let mut parser = Parser::new(scanner);
+        let program = parse_program(&mut parser)?;
+
+        let db = db::DB::new_temp()?;
+        let txn = db.begin_transaction();
+        let answers = batch_eval(&txn, program)?;
+        txn.commit()?;
+
+        let atoms = answers
+            .into_iter()
+            .flat_map(|answer| answer.get_atoms().into_iter())
+            .collect::<HashSet<_>>();
+
+        assert_eq!(
+            atoms,
+            HashSet::from([
+                Term::Atom(
+                    "num_fruits".into(),
+                    vec![
+                        Term::Sym("alice".into()),
+                        Term::Atom(
+                            "s".into(),
+                            vec![Term::Atom("s".into(), vec![Term::Sym("z".into())], false)],
+                            false
+                        )
+                    ],
+                    false
+                ),
+                Term::Atom(
+                    "num_fruits".into(),
+                    vec![Term::Sym("bob".into()), Term::Atom("s".into(), vec![Term::Sym("z".into())], false)],
+                    false
+                ),
+                Term::Atom("num_fruits".into(), vec![Term::Sym("dave".into()), Term::Sym("z".into())], false),
+            ])
+        );
+
+        Ok(())
+    }
 }

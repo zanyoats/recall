@@ -19,9 +19,17 @@ pub enum AssertionKind {
     RuleClause { head: Atom, body: Vec<Atom> },
 }
 
-fn is_zero_arity_rule(term: &Term) -> bool {
+fn is_ground_term(term: &Term) -> bool {
+    match term {
+        Term::Sym(_) | Term::Str(_) | Term::Int(_) => true,
+        Term::Var(_) => false,
+        Term::Atom(_, args, _) => args.iter().all(is_ground_term),
+    }
+}
+
+fn is_fact_assertion(term: &Term) -> bool {
     if let Term::Atom(_, args, _) = term {
-        args.len() == 0
+        args.iter().all(is_ground_term)
     } else {
         unreachable!()
     }
@@ -94,12 +102,11 @@ impl<'a> Parser<'a> {
 ///                     | <atom> [ ":-" <body> ] "!"
 /// <body>          ::= [ "not" ] <atom> { "," [ "not" ] <atom> }
 /// <atom>          ::= | <sym> [ "(" [ <terms> ] ")" ]
-///                     | <str> [ "(" [ <terms> ] ")" ]
 /// <terms>         ::= <term> { "," <term> }
-/// <term>          ::= | <sym>
-///                     | <str>
+/// <term>          ::= | <str>
 ///                     | [ "+" | "-" ] <int>
 ///                     | <var>
+///                     | <atom>
 
 pub fn parse_program<'a>(parser: &'a mut Parser) -> Result<Program, anyhow::Error> {
     let mut statements = vec![];
@@ -123,19 +130,19 @@ fn parse_statement<'a>(parser: &'a mut Parser) -> Result<Statement, anyhow::Erro
         Token::Query => Ok(Statement::Query(head)),
         Token::Assertion => {
             Ok(Statement::Assertion(
-                if is_zero_arity_rule(&head) {
-                    AssertionKind::RuleClause { head, body: vec![] }
-                } else {
+                if is_fact_assertion(&head) {
                     AssertionKind::Fact { head }
+                } else {
+                    AssertionKind::RuleClause { head, body: vec![] }
                 }
             ))
         },
         Token::Retraction => {
             Ok(Statement::Retraction(
-                if is_zero_arity_rule(&head) {
-                    AssertionKind::RuleClause { head, body: vec![] }
-                } else {
+                if is_fact_assertion(&head) {
                     AssertionKind::Fact { head }
+                } else {
+                    AssertionKind::RuleClause { head, body: vec![] }
                 }
             ))
         },
@@ -193,16 +200,16 @@ fn parse_body<'a>(parser: &'a mut Parser) -> Result<Vec<Atom>, anyhow::Error> {
 }
 
 fn parse_atom<'a>(parser: &'a mut Parser, negated: bool) -> Result<Atom, anyhow::Error> {
-    let name = match parse_term(parser)? {
-        Term::Sym(s) | Term::Str(s) => s,
-        term => {
+    let name =
+        if let Token::Atom(s) = parser.scanner.next_token()? {
+            s
+        } else {
             return Err(RecallError::ParseError(format!(
-                "head position of literal needs to be an symbol or string, got {}",
-                term,
+                "head position of atom needs to be a symbol",
             ))
             .into())
-        }
-    };
+        };
+
     let args = if let Token::LP = parser.scanner.peek_token()? {
         expect_token(parser, Token::LP)?;
 
@@ -233,42 +240,56 @@ fn parse_terms<'a>(parser: &'a mut Parser) -> Result<Vec<Term>, anyhow::Error> {
 }
 
 fn parse_term<'a>(parser: &'a mut Parser) -> Result<Term, anyhow::Error> {
-    match parser.scanner.next_token()? {
+    match parser.scanner.peek_token()? {
         /* <sym> */
-        Token::Atom(s) => Ok(Term::Sym(s)),
-        /* <str> */
-        Token::Str(s) => Ok(Term::Str(s)),
-        /* <int> */
-        Token::Integer(n) => Ok(Term::Int(n)),
-        /* + <int> */
-        Token::Plus => {
-            let token = parser.scanner.next_token()?;
-
-            if let Token::Integer(n) = token {
-                Ok(Term::Int(n))
+        Token::Atom(_) => {
+            let term = parse_atom(parser, false)?;
+            if let Term::Atom(name, args, negated) = term {
+                if args.is_empty() && !negated {
+                    Ok(Term::Sym(name))
+                } else {
+                    Ok(Term::Atom(name, args, negated))
+                }
             } else {
-                Err(
-                    RecallError::ParseError(format!("expected integer term but got '{}'", token,))
-                        .into(),
-                )
+                unreachable!()
             }
         },
-        /* - <int> */
-        Token::Minus => {
-            let token = parser.scanner.next_token()?;
+        _ => {
+            match parser.scanner.next_token()? {
+                /* <str> */
+                Token::Str(s) => Ok(Term::Str(s)),
+                /* <int> */
+                Token::Integer(n) => Ok(Term::Int(n)),
+                /* + <int> */
+                Token::Plus => {
+                    let token = parser.scanner.next_token()?;
 
-            if let Token::Integer(n) = token {
-                Ok(Term::Int(-n))
-            } else {
-                Err(
-                    RecallError::ParseError(format!("expected integer term but got '{}'", token,))
-                        .into(),
-                )
+                    if let Token::Integer(n) = token {
+                        Ok(Term::Int(n))
+                    } else {
+                        Err(
+                            RecallError::ParseError(format!("expected integer term but got '{}'", token,))
+                                .into(),
+                        )
+                    }
+                },
+                /* - <int> */
+                Token::Minus => {
+                    let token = parser.scanner.next_token()?;
+                    if let Token::Integer(n) = token {
+                        Ok(Term::Int(-n))
+                    } else {
+                        Err(
+                            RecallError::ParseError(format!("expected integer term but got '{}'", token,))
+                                .into(),
+                        )
+                    }
+                },
+                /* <var> */
+                Token::Var(s) => Ok(Term::Var(s)),
+                token => Err(RecallError::ParseError(format!("expected term but got '{}'", token,)).into()),
             }
         },
-        /* <var> */
-        Token::Var(s) => Ok(Term::Var(s)),
-        token => Err(RecallError::ParseError(format!("expected term but got '{}'", token,)).into()),
     }
 }
 
@@ -296,6 +317,10 @@ mod tests {
             succeed :- true.
             fail :- fruit(oats).
             fruit(pear).
+            true.
+            succeed :- true.
+            fail :- fruit(oats).
+            fruit(pear).
             link(a, b).
             link(b, c).
             link(c, c).
@@ -312,6 +337,54 @@ mod tests {
         let scanner = Scanner::new(program);
         let mut parser = Parser::new(scanner);
         parse_program(&mut parser)?;
+        Ok(())
+    }
+
+    #[test]
+    fn it_parses_valid_functor_program() -> Result<(), anyhow::Error> {
+        let program = "
+            # facts
+            person(
+                alice,
+                cons(apple, cons(pear, nil))
+            ).
+
+            len(nil, z).
+            len(cons(H, T), s(N)) :- len(T, N).
+        ";
+        let scanner = Scanner::new(program);
+        let mut parser = Parser::new(scanner);
+        parse_program(&mut parser)?;
+        Ok(())
+    }
+
+    #[test]
+    fn it_treats_non_ground_assertions_as_rules() -> Result<(), anyhow::Error> {
+        let program = "
+            first(cons(H, T), H).
+            person(alice, cons(apple, nil)).
+        ";
+        let scanner = Scanner::new(program);
+        let mut parser = Parser::new(scanner);
+        let parsed = parse_program(&mut parser)?;
+
+        assert_eq!(parsed.len(), 2);
+
+        match &parsed[0] {
+            Statement::Assertion(AssertionKind::RuleClause { head, body }) => {
+                assert_eq!(head.atom_name(), "first");
+                assert!(body.is_empty());
+            }
+            _ => panic!("expected first clause to be a rule"),
+        }
+
+        match &parsed[1] {
+            Statement::Assertion(AssertionKind::Fact { head }) => {
+                assert_eq!(head.atom_name(), "person");
+            }
+            _ => panic!("expected second clause to be a fact"),
+        }
+
         Ok(())
     }
 }

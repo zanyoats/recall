@@ -31,7 +31,9 @@ pub fn check_range_restriction_property(program: &Program) -> Result<(), anyhow:
                     .flat_map(collect_variables)
                     .collect::<Vec<&String>>();
                 for head_var in head_vars {
-                    if !body_vars.contains(&head_var) {
+                    if !body_vars.contains(&head_var)
+                        && !head_functor_binds_var(head, head_var)
+                    {
                         return Err(errors::RecallError::TypeError(format!(
                             "variable '{}' in head of {}/{} not found in body",
                             head_var, name, arity,
@@ -95,39 +97,37 @@ pub fn rename_vars(defs: HashMap<(String, u8), Rule>) -> lang::Defs {
 
     let mut k = 0u32;
 
+    fn rename_term(
+        term: Term,
+        renames: &mut HashMap<String, String>,
+        k: &mut u32,
+    ) -> Term {
+        match term {
+            Term::Var(var) => {
+                let entry = renames.entry(var).or_insert_with(|| {
+                    *k = k.checked_add(1).unwrap();
+                    format!("v{}", *k)
+                }).clone();
+                Term::Var(entry)
+            }
+            Term::Atom(name, args, negated) => {
+                let args = args
+                    .into_iter()
+                    .map(|arg| rename_term(arg, renames, k))
+                    .collect();
+                Term::Atom(name, args, negated)
+            }
+            other => other,
+        }
+    }
+
     for ((name, arity), rule) in defs {
         let atom_spec = format!("{}/{}", name, arity);
-
-        let head_suffixes = (0..arity)
-            .map(|_| {
-                k = k.checked_add(1).unwrap();
-                k
-            })
-            .collect::<Vec<_>>();
 
         let mut head_renames = HashMap::new();
 
         // work on head atoms
-        let head = {
-            let (name, args, negated) = rule.head.atom_parts();
-
-            debug_assert_eq!(args.len(), arity.into());
-
-            let mut args_ = Vec::with_capacity(args.len());
-
-            for (i, atom) in args.into_iter().enumerate() {
-                args_.push(match atom {
-                    Term::Var(var) => {
-                        let var_ = format!("v{}", head_suffixes[i]);
-                        head_renames.insert(var, var_.clone());
-                        Term::Var(var_)
-                    },
-                    _ => atom,
-                });
-            }
-
-            Term::Atom(name, args_, negated)
-        };
+        let head = rename_term(rule.head, &mut head_renames, &mut k);
 
         let mut clauses: Vec<Vec<Atom>> = Vec::with_capacity(rule.clauses.len());
 
@@ -137,27 +137,7 @@ pub fn rename_vars(defs: HashMap<(String, u8), Rule>) -> lang::Defs {
 
             let mut clause_: Vec<Atom> = vec![];
             for atom in clause {
-                let (name, args, negated) = atom.atom_parts();
-
-                let mut args_ = Vec::with_capacity(args.len());
-
-                for atom in args {
-                    args_.push(match atom {
-                        Term::Var(var) => {
-                            if let Some(var_) = clause_renames.get(&var) {
-                                Term::Var(var_.to_string())
-                            } else {
-                                k = k.checked_add(1).unwrap();
-                                let var_ = format!("v{}", k);
-                                clause_renames.insert(var, var_.clone());
-                                Term::Var(var_)
-                            }
-                        }
-                        _ => atom,
-                    });
-                }
-
-                clause_.push(Term::Atom(name, args_, negated));
+                clause_.push(rename_term(atom, &mut clause_renames, &mut k));
             }
 
             clauses.push(clause_);
@@ -298,6 +278,25 @@ fn collect_variables(term: &Term) -> Vec<&String> {
         Term::Var(s) => vec![s],
         Term::Atom(_, terms, _) => terms.iter().flat_map(collect_variables).collect(),
         _ => vec![],
+    }
+}
+
+fn term_contains_var(term: &Term, var: &str) -> bool {
+    match term {
+        Term::Var(name) => name == var,
+        Term::Atom(_, terms, _) => terms.iter().any(|term| term_contains_var(term, var)),
+        _ => false,
+    }
+}
+
+fn head_functor_binds_var(head: &Term, var: &str) -> bool {
+    if let Term::Atom(_, args, _) = head {
+        args
+            .iter()
+            .filter(|term| matches!(term, Term::Atom(_, _, _)))
+            .any(|term| term_contains_var(term, var))
+    } else {
+        false
     }
 }
 
@@ -668,7 +667,7 @@ mod tests {
             ";
             let rules = collect_rules(program)?;
             let strata = stratify_rules(rules.clone())?;
-            assert_eq!(strata.len(), 4);
+            assert_eq!(strata.len(), 3);
         }
 
         {
@@ -680,7 +679,7 @@ mod tests {
             ";
             let rules = collect_rules(program)?;
             let strata = stratify_rules(rules.clone())?;
-            assert_eq!(strata.len(), 3);
+            assert_eq!(strata.len(), 2);
         }
 
         {

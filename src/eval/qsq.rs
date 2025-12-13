@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::lang::analysis;
 use crate::lang::unify;
@@ -72,6 +73,110 @@ fn collect_rules<DB: DBAux>(
     result
 }
 
+fn term_with_suffix(term: Term, suffix: &str) -> Term {
+    match term {
+        Term::Var(var) => Term::Var(format!("{}_{}", var, suffix)),
+        Term::Atom(name, args, negated) => {
+            Term::Atom(
+                name,
+                args.into_iter().map(|arg| term_with_suffix(arg, suffix)).collect(),
+                negated,
+            )
+        }
+        other => other,
+    }
+}
+
+fn term_without_suffix(term: Term, suffix: &str) -> Term {
+    match term {
+        Term::Var(var) => {
+            let mut trimmed = var.strip_suffix(suffix).unwrap_or(&var).to_string();
+            if trimmed.ends_with('_') {
+                trimmed.pop();
+            }
+            Term::Var(trimmed)
+        }
+        Term::Atom(name, args, negated) => {
+            Term::Atom(
+                name,
+                args.into_iter().map(|arg| term_without_suffix(arg, suffix)).collect(),
+                negated,
+            )
+        }
+        other => other,
+    }
+}
+
+fn fresh_var_suffix() -> String {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("__fresh{id}")
+}
+
+fn term_is_ground(term: &Term) -> bool {
+    match term {
+        Term::Var(_) => false,
+        Term::Atom(_, args, _) => args.iter().all(term_is_ground),
+        _ => true,
+    }
+}
+
+fn term_contains_var(term: &Term, target: &str) -> bool {
+    match term {
+        Term::Var(var) => var == target,
+        Term::Atom(_, args, _) => args.iter().any(|arg| term_contains_var(arg, target)),
+        _ => false,
+    }
+}
+
+fn atom_bound_flags(atom: &Atom) -> Option<Vec<char>> {
+    let arity = atom.atom_arity() as usize;
+    atom.atom_name()
+        .rsplit_once('_')
+        .and_then(|(_, suffix)| {
+            if suffix.len() == arity && suffix.chars().all(|c| c == 'b' || c == 'f') {
+                Some(suffix.chars().collect::<Vec<_>>())
+            } else {
+                None
+            }
+        })
+}
+
+fn atom_bound_args_ground(atom: &Atom) -> bool {
+    if let Some(flags) = atom_bound_flags(atom) {
+        atom.atom_args()
+            .iter()
+            .zip(flags.iter())
+            .all(|(arg, flag)| *flag != 'b' || term_is_ground(arg))
+    } else {
+        true
+    }
+}
+
+fn collect_term_vars(term: &Term, vars: &mut Vec<String>) {
+    match term {
+        Term::Var(var) => {
+            if !vars.contains(var) {
+                vars.push(var.clone());
+            }
+        }
+        Term::Atom(_, args, _) => {
+            for arg in args {
+                collect_term_vars(arg, vars);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn term_is_bound(term: &Term, bound_vars: &Vec<String>) -> bool {
+    match term {
+        Term::Var(var) => bound_vars.contains(var),
+        Term::Atom(_, args, _) => args.iter().all(|arg| term_is_bound(arg, bound_vars)),
+        _ => true,
+    }
+}
+
 fn rewrite_query_atom(atom: &Atom, bound_flags: &Vec<bool>) -> Atom {
     let suffix = bound_flags
         .into_iter()
@@ -108,10 +213,7 @@ fn rewrite_rule_atom(
         .atom_args()
         .iter()
         .cloned()
-        .map(|atom| match atom {
-            Term::Var(var) => Term::Var(format!("{}_{}", var, var_suffix)),
-            other => other,
-        })
+        .map(|atom| term_with_suffix(atom, &var_suffix))
         .collect::<Vec<_>>();
     let negated = atom.atom_negated();
 
@@ -130,10 +232,7 @@ fn rewrite_fact_atom(atom: &Atom, head_bound_flags: &Vec<bool>) -> Atom {
         .atom_args()
         .iter()
         .cloned()
-        .map(|atom| match atom {
-            Term::Var(var) => Term::Var(format!("{}_{}", var, var_suffix)),
-            other => other,
-        })
+        .map(|atom| term_with_suffix(atom, &var_suffix))
         .collect::<Vec<_>>();
     let negated = atom.atom_negated();
 
@@ -174,9 +273,7 @@ fn adorn_program(query: &Atom, defs: Defs) -> (Atom, Defs) {
         let mut head_bounded_vars = vec![];
         for i in 0..bound_flags.len() {
             if bound_flags[i] {
-                if let Term::Var(var) = &rule.head.atom_args()[i] {
-                    head_bounded_vars.push(var.to_string());
-                }
+                collect_term_vars(&rule.head.atom_args()[i], &mut head_bounded_vars);
             }
         }
 
@@ -199,11 +296,7 @@ fn adorn_program(query: &Atom, defs: Defs) -> (Atom, Defs) {
                     let mut atom_bound_flags = Vec::with_capacity(arity.into());
 
                     for i in 0..arity.into() {
-                        if let Term::Var(var) = &atom.atom_args()[i] {
-                            atom_bound_flags.push(clause_bounded_vars.contains(var));
-                        } else {
-                            atom_bound_flags.push(true);
-                        }
+                        atom_bound_flags.push(term_is_bound(&atom.atom_args()[i], &clause_bounded_vars));
                     }
 
                     if !adorned_rules.contains(&(name.to_string(), atom_bound_flags.clone())) {
@@ -219,11 +312,7 @@ fn adorn_program(query: &Atom, defs: Defs) -> (Atom, Defs) {
 
                 // add all variables not bound to bounded vars
                 for arg in atom.atom_args() {
-                    if let Term::Var(var) = arg {
-                        if !clause_bounded_vars.contains(var) {
-                            clause_bounded_vars.push(var.to_string())
-                        }
-                    }
+                    collect_term_vars(arg, &mut clause_bounded_vars);
                 }
             }
 
@@ -266,7 +355,19 @@ pub fn eval_query<DB: DBAux>(query: Atom, db_helper: &mut DB) -> QueryAnswer {
         };
         let mut query_result =
             initialize_query_result(&query_program);
+        if std::env::var("DEBUG_STRATA").is_ok() {
+            for (i, stratum) in query_program.strata.iter().enumerate() {
+                let mut keys = stratum.keys().cloned().collect::<Vec<_>>();
+                keys.sort();
+                println!("stratum {i}: {keys:?}");
+            }
+        }
         eval_until_fixpoint(&query_program, &mut query_result, db_helper);
+        if std::env::var("DEBUG_STRATA").is_ok() {
+            for (key, val) in query_result.answers.iter() {
+                println!("{key} -> {:?}", val);
+            }
+        }
         // println!("{query_program:?}");
         // println!("{query_result:?}");
         let answer =
@@ -282,6 +383,9 @@ pub fn eval_query<DB: DBAux>(query: Atom, db_helper: &mut DB) -> QueryAnswer {
 }
 
 fn initialize_query_result(program: &QueryProgram) -> QueryResult {
+    if std::env::var("DEBUG_ITERS").is_ok() {
+        eprintln!("initialize_query_result start");
+    }
     let mut inputs = HashMap::new();
     let mut answers = HashMap::new();
 
@@ -303,17 +407,21 @@ fn initialize_query_result(program: &QueryProgram) -> QueryResult {
         for stratum in program.strata.iter() {
             if let Some(rule) = stratum.get(&atom_spec) {
                 if let Some(bindings) = unify::unify(&rule.head, &atom) {
+                    let filtered = unify::filter_bound(&bindings);
                     let set = inputs.get_mut(&atom_spec).unwrap();
 
-                    if set.is_empty() {
-                        set.push(unify::filter_bound(&bindings));
+                    if set.is_empty() && atom_bound_args_ground(&atom) {
+                        set.push(filtered.clone());
                     }
 
                     for clause in rule.clauses.iter() {
                         for atom in clause.iter() {
                             if let Some(set) = inputs.get(&atom.atom_spec()) {
-                                if set.is_empty() {
-                                    stack.push(unify::substitute_bindings(atom, &bindings));
+                                if set.is_empty() && atom_bound_args_ground(atom) {
+                                    let atom = unify::substitute_bindings(atom, &bindings);
+                                    if atom_bound_args_ground(&atom) {
+                                        stack.push(atom);
+                                    }
                                 }
                             }
                         }
@@ -336,16 +444,57 @@ fn eval_until_fixpoint<DB: DBAux>(
     result: &mut QueryResult,
     db_helper: &mut DB,
 ) {
-    for stratum in program.strata.iter() {
-        loop {
-            result.inputs_changed = false;
-            result.answers_changed = false;
+    let debug_iters = std::env::var("DEBUG_ITERS").is_ok();
+    let mut iter = 0usize;
+    if debug_iters {
+        eprintln!("enter eval_until_fixpoint");
+    }
+    loop {
+        let mut strata_changed = false;
 
-            eval_stratum(&program.strata, stratum, result, db_helper);
+        for stratum in program.strata.iter() {
+            let mut inner_iters = 0usize;
+            loop {
+                result.inputs_changed = false;
+                result.answers_changed = false;
 
-            if !result.inputs_changed && !result.answers_changed {
-                break;
+                let (local_inputs_changed, local_answers_changed) =
+                    eval_stratum(&program.strata, stratum, result, db_helper);
+
+                if result.inputs_changed || result.answers_changed {
+                    strata_changed = true;
+                }
+
+                if !local_inputs_changed && !local_answers_changed {
+                    break;
+                }
+
+                inner_iters += 1;
+                if debug_iters {
+                    eprintln!(
+                        "inner iter {} inputs_changed={} answers_changed={}",
+                        inner_iters, result.inputs_changed, result.answers_changed
+                    );
+                }
+                if inner_iters > 10_000 {
+                    panic!("inner fixpoint did not converge");
+                }
             }
+        }
+
+        iter += 1;
+        if debug_iters {
+            println!(
+                "fixpoint iter {} inputs_changed={} answers_changed={}",
+                iter, result.inputs_changed, result.answers_changed
+            );
+        }
+        if iter > 10_000 {
+            panic!("fixpoint did not converge after {iter} iterations");
+        }
+
+        if !strata_changed {
+            break;
         }
     }
 }
@@ -355,8 +504,68 @@ fn eval_stratum<DB: DBAux>(
     stratum: &Defs,
     result: &mut QueryResult,
     db_helper: &mut DB,
-) {
+) -> (bool, bool) {
+    let debug_iters = std::env::var("DEBUG_ITERS").is_ok();
+    let mut iter = 0usize;
+    let mut local_inputs_changed = false;
+    let mut local_answers_changed = false;
     for (atom_spec, rule) in stratum.iter() {
+        let before_inputs_len = result.inputs.get(atom_spec).map(|v| v.len()).unwrap_or(0);
+        let before_answers_len = result.answers.get(atom_spec).map(|s| s.len()).unwrap_or(0);
+
+        // Seed this predicate's answers with extensional database facts so
+        // predicates that have both facts and rules (e.g., base cases) can
+        // participate in fixpoint evaluation.
+        {
+            let head = &rule.head;
+            let arity = head.atom_arity();
+            let head_name = head.atom_name();
+            let base_name = head_name
+                .rsplit_once('_')
+                .and_then(|(prefix, suffix)| {
+                    if suffix.len() == usize::from(arity)
+                        && suffix.chars().all(|c| c == 'b' || c == 'f')
+                    {
+                        Some(prefix.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| head_name.clone());
+
+            // Query for all facts of this predicate using a wildcard atom so
+            // we do not lose facts because of adornment or head shape.
+            let fact_atom = Term::Atom(
+                base_name.clone(),
+                (0..arity).map(|i| Term::Var(format!("_{}", i))).collect(),
+                head.atom_negated(),
+            );
+
+            if !atom_bound_args_ground(&fact_atom) {
+                continue;
+            }
+
+            let fact_bindings = eval_db_fact(&fact_atom, HashMap::new(), db_helper);
+            let fact_atoms: Vec<_> = fact_bindings
+                .into_iter()
+                .map(|bindings| unify::substitute_bindings(&fact_atom, &bindings))
+                .filter_map(|fact| {
+                    if let Term::Atom(_, args, negated) = fact {
+                        Some(Term::Atom(head_name.clone(), args, negated))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            let set = result.answers.get_mut(atom_spec).unwrap();
+            for fact in fact_atoms {
+                if set.insert(fact) {
+                    result.answers_changed = true;
+                }
+            }
+        }
+
         let mut derived_atoms = HashSet::new();
 
         let inputs =
@@ -402,7 +611,23 @@ fn eval_stratum<DB: DBAux>(
                 result.answers_changed = true;
             }
         }
+
+        iter += 1;
+        if debug_iters && iter > 10_000 {
+            panic!("stratum {atom_spec} did not converge after {iter} iterations");
+        }
+
+        let after_inputs_len = result.inputs.get(atom_spec).map(|v| v.len()).unwrap_or(0);
+        let after_answers_len = result.answers.get(atom_spec).map(|s| s.len()).unwrap_or(0);
+        if after_inputs_len > before_inputs_len {
+            local_inputs_changed = true;
+        }
+        if after_answers_len > before_answers_len {
+            local_answers_changed = true;
+        }
     }
+
+    (local_inputs_changed, local_answers_changed)
 }
 
 fn eval_rule_body<DB: DBAux>(
@@ -434,6 +659,7 @@ fn eval_atom<DB: DBAux>(
     bindings: Bindings,
 ) -> Vec<Bindings> {
     let atom_spec = atom.atom_spec();
+    let mut added_input = false;
     let find_rule = {
         let mut rule_opt = None;
         for stratum in strata.iter() {
@@ -446,7 +672,7 @@ fn eval_atom<DB: DBAux>(
     };
     let atom_bindings = if let Some(rule) = find_rule {
         // new sub-query case
-        if stratum.contains_key(&atom_spec) {
+        if result.inputs.contains_key(&atom_spec) {
             let set =
                 result
                 .inputs
@@ -454,15 +680,52 @@ fn eval_atom<DB: DBAux>(
                 .unwrap();
             let atom_ =
                 unify::substitute_bindings(atom, &bindings);
+            let should_add_input = atom_bound_args_ground(&atom_);
+            let fresh_suffix = fresh_var_suffix();
+            let fresh_head =
+                term_with_suffix(rule.head.clone(), &fresh_suffix);
             let bindings_ =
-                unify::unify(&rule.head, &atom_)
-                .unwrap();
-            let new =
-                unify::filter_bound(&bindings_);
+                unify::unify(&fresh_head, &atom_);
 
-            if !set.contains(&new) {
-                set.push(new);
-                result.inputs_changed = true;
+            // If the rule head cannot unify with this atom under current bindings,
+            // there is nothing to propagate.
+            if should_add_input && bindings_.is_some() {
+                let bindings_ = bindings_.unwrap();
+                let mut head_vars = vec![];
+                collect_term_vars(&rule.head, &mut head_vars);
+
+                let bindings_vec: Vec<(String, Term)> =
+                    bindings_
+                    .into_iter()
+                    .map(|(var, term)| {
+                        let mut var = var
+                            .strip_suffix(&fresh_suffix)
+                            .unwrap_or(&var)
+                            .to_string();
+                        if var.ends_with('_') {
+                            var.pop();
+                        }
+                        (var, term_without_suffix(term, &fresh_suffix))
+                    })
+                    .filter(|(var, term)| !term_contains_var(term, var))
+                    .collect();
+
+                let bindings_clean: Bindings = bindings_vec
+                    .into_iter()
+                    .filter(|(var, _)| head_vars.contains(var))
+                    .collect();
+
+                if bindings_clean.is_empty() && !head_vars.is_empty() {
+                    return vec![];
+                }
+
+                let new = unify::filter_bound(&bindings_clean);
+
+                if !set.contains(&new) {
+                    set.push(new);
+                    result.inputs_changed = true;
+                    added_input = true;
+                }
             }
             // let atom1 = unify::substitute_bindings(atom, &bindings);
             // let bindings1 = unify::unify(&atom1, &rule.head).unwrap();
@@ -494,7 +757,9 @@ fn eval_atom<DB: DBAux>(
     };
 
     return if atom.atom_negated() {
-        if atom_bindings.is_empty() {
+        if added_input {
+            vec![]
+        } else if atom_bindings.is_empty() {
             vec![bindings]
         } else {
             vec![]
@@ -878,6 +1143,97 @@ mod tests {
             answer.get_atoms(),
             HashSet::from([atom("indirect", vec![symbol("x"), symbol("z")]),])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn qsq_functor_test() -> Result<(), anyhow::Error> {
+        let mut db_helper = TestDBAux::from_string(
+            "
+            person(alice, cons(apple, cons(pear, nil))).
+            person(bob, cons(lemon, nil)).
+            person(dave, nil).
+
+            first(cons(H, T), H).
+
+            my_first_fruit(Name, F) :-
+              person(Name, Fs),
+              first(Fs, F).
+
+            my_first_fruit(Name, Fruit)?
+        ",
+        )?;
+
+        let answer = eval_query(db_helper.query.clone().unwrap(), &mut db_helper);
+        assert_eq!(
+            answer.get_atoms(),
+            HashSet::from([
+                atom("my_first_fruit", vec![symbol("alice"), symbol("apple")]),
+                atom("my_first_fruit", vec![symbol("bob"), symbol("lemon")]),
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn qsq_functor_len_test() -> Result<(), anyhow::Error> {
+        let mut db_helper = TestDBAux::from_string(
+            "
+            person(alice, cons(apple, cons(pear, nil))).
+            person(bob, cons(lemon, nil)).
+            person(dave, nil).
+
+            len(nil, z).
+            len(cons(H, T), s(N)) :- len(T, N).
+
+            num_fruits(Name, Num) :-
+              person(Name, Fs),
+              len(Fs, Num).
+
+            num_fruits(Name, Num)?
+        ",
+        )?;
+
+        let answer = eval_query(db_helper.query.clone().unwrap(), &mut db_helper);
+        assert_eq!(
+            answer.get_atoms(),
+            HashSet::from([
+                atom("num_fruits", vec![symbol("alice"), atom("s", vec![atom("s", vec![symbol("z")])])]),
+                atom("num_fruits", vec![symbol("bob"), atom("s", vec![symbol("z")])]),
+                atom("num_fruits", vec![symbol("dave"), symbol("z")]),
+            ])
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn qsq_functor_len_alice_test() -> Result<(), anyhow::Error> {
+        let mut db_helper = TestDBAux::from_string(
+            "
+            person(alice, cons(apple, cons(pear, nil))).
+            person(bob, cons(lemon, nil)).
+            person(dave, nil).
+
+            len(nil, z).
+            len(cons(H, T), s(N)) :- len(T, N).
+
+            num_fruits(Name, Num) :-
+              person(Name, Fs),
+              len(Fs, Num).
+
+            num_fruits(alice, Num)?
+        ",
+        )?;
+
+        let answer = eval_query(db_helper.query.clone().unwrap(), &mut db_helper);
+        assert_eq!(
+            answer.get_atoms(),
+            HashSet::from([
+                atom("num_fruits", vec![symbol("alice"), atom("s", vec![atom("s", vec![symbol("z")])])]),
+            ])
+        );
+
         Ok(())
     }
 }
