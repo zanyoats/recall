@@ -39,7 +39,6 @@ fn parse_config(mut iter: impl Iterator<Item = String>) -> Result<Config, anyhow
         h: false,
         c: false,
         v: false,
-        i: false,
         program: String::new(),
         db: None,
     };
@@ -54,9 +53,6 @@ fn parse_config(mut iter: impl Iterator<Item = String>) -> Result<Config, anyhow
             }
             "-c" => {
                 result.c = true;
-            }
-            "-i" => {
-                result.i = true;
             }
             "-f" => {
                 if let Some(path) = iter.next() {
@@ -119,17 +115,6 @@ fn run(cfg: Config) -> Result<(), anyhow::Error> {
     } else {
         DB::new_temp()?
     };
-
-    if cfg.i {
-        let txn = db.begin_transaction();
-        match txn.info() {
-            Ok(_) => {
-                txn.rollback()?;
-                return Ok(());
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
 
     if cfg.program.is_empty() {
         run_repl(db)?;
@@ -323,10 +308,9 @@ fn help(program: &str) -> String {
     result.push_str("Options:\n");
     result.push_str("-h:            help\n");
     result.push_str("-v:            verbose (debug info)\n");
-    result.push_str("-i:            info\n");
     result.push_str("-f file:       read in datalog program from file\n");
     result.push_str("-s '...':      read in datalog program from string\n");
-    result.push_str("-c:            analysis only (check), prints out inferred declarations\n");
+    result.push_str("-c:            analysis checks\n");
     result.push('\n');
     result.push_str("Argument:\n");
     result.push_str("[db]:          path to db root folder, if not supplied, create\n");

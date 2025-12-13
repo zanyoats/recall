@@ -403,42 +403,6 @@ impl<'a> TransactionOp<'a> {
         todo!()
     }
 
-    pub fn info(&self) -> Result<(), anyhow::Error> {
-        println!("meta:");
-        let prefix =
-            self
-            .tx
-            .get_cf(self.meta, &[format::NEXT_PREFIX_SEQ])?
-            .unwrap();
-        let (prefix_code, _) = prefix.decode_u16();
-
-        let id =
-            self
-            .tx
-            .get_cf(self.meta, &[format::NEXT_TUP_SEQ])?
-            .unwrap();
-        let (tuple_id, _) = id.decode_u32();
-        println!("\tprefix code {}", prefix_code);
-        println!("\ttuple id    {}", tuple_id);
-
-        println!();
-
-        println!("declarations:");
-        let iter = self.tx.iterator_cf(
-            self.decl,
-            IteratorMode::Start,
-        );
-        for result in iter {
-            let (key, prefix) = result?;
-            let (name, rest) = key.decode_string();
-            let (arity, _) = rest.decode_u8();
-            let (prefix_code, _) = prefix.decode_u16();
-            println!("\t{}/{} ({})", name, arity, prefix_code);
-        }
-
-        Ok(())
-    }
-
     pub fn commit(self) -> Result<(), anyhow::Error> {
         self.tx.commit()?;
         Ok(())

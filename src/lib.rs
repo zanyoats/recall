@@ -41,7 +41,6 @@ pub struct Config {
     pub h: bool,
     pub v: bool,
     pub c: bool,
-    pub i: bool,
     pub program: String,
     pub db: Option<PathBuf>,
 }

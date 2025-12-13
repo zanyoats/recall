@@ -31,10 +31,9 @@ Upon exiting, it will drop the database.
 Options:
 -h:            help
 -v:            verbose (debug info)
--i:            info
 -f file:       read in datalog program from file
 -s '...':      read in datalog program from string
--c:            analysis only (check), prints out inferred declarations
+-c:            analysis checks
 
 Argument:
 [db]:          path to db root folder, if not supplied, create
